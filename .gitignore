@@ -1,0 +1,33 @@
+.DS_Store
+.AppleDouble
+.LSOverride
+*.app/
+*.zip
+*.dmg
+*.pkg
+.env
+.env.*
+*.pem
+*.p12
+*.key
+
+# Local tooling and machine-specific operations
+/.codegraph/
+/.code-review-graph/
+/.codex/
+/.skill-build/
+/AGENTS.md
+/scripts/
+/shell-desktop-ops/
+/docs/
+
+# Build products and captured local test evidence
+/SwiftTerminal/.build/
+/SwiftTerminal/build/
+/SwiftTerminal/LocalTerminalView.swift
+/SwiftTerminal/Tests/SwiftTerminalTests/NASRealHostE2ETests.swift
+/SwiftTerminal/Tests/SwiftTerminalTests/SSHRealHostE2ETests.swift
+/SwiftTerminal/docs/*
+!/SwiftTerminal/docs/
+!/SwiftTerminal/docs/软件更新.md
+/SwiftTerminal/docs/evidence/

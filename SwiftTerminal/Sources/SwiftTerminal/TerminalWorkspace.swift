@@ -209,9 +209,7 @@ struct TerminalWorkspace: View {
     @State private var splitDragStart: CGFloat?
     @State private var showSidebar = true
     @State private var showAssistant = true
-    @State private var showHostEditor = false
-    @State private var hostDraft = SSHHost(name: "", address: "", username: "")
-    @State private var isNewHost = true
+    @State private var hostEditorPresentation: SSHHostEditorPresentation?
     @State private var pendingDelete: SSHHost?
     @State private var errorMessage: String?
     @State private var pendingQuote: AIQuote?
@@ -354,13 +352,16 @@ struct TerminalWorkspace: View {
                 }
                 Button("取消", role: .cancel) { pendingSMBDelete = nil }
             } message: { Text("只删除应用中的连接资料，不删除共享文件，也不卸载系统卷。") }
-            .sheet(isPresented: $showHostEditor) {
+            .sheet(item: $hostEditorPresentation) { presentation in
                 SSHHostEditor(
-                    host: hostDraft,
+                    host: presentation.host,
                     knownGroups: SSHHostGrouping.knownGroups(hosts),
-                    isNewHost: isNewHost,
+                    isNewHost: presentation.isNewHost,
                     onSave: saveHost
                 )
+                // The editor stores its form model in @State; give each open a
+                // new identity so that state is initialized from this request.
+                .id(presentation.id)
             }
             .alert("删除 SSH 主机？", isPresented: deleteAlertBinding) {
                 Button("取消", role: .cancel) { pendingDelete = nil }
@@ -1206,15 +1207,14 @@ struct TerminalWorkspace: View {
     }
 
     private func beginAddHost() {
-        hostDraft = SSHHost(name: "", address: "", username: "")
-        isNewHost = true
-        showHostEditor = true
+        hostEditorPresentation = SSHHostEditorPresentation(
+            host: SSHHost(name: "", address: "", username: ""),
+            isNewHost: true
+        )
     }
 
     private func beginEditHost(_ host: SSHHost) {
-        hostDraft = host
-        isNewHost = false
-        showHostEditor = true
+        hostEditorPresentation = SSHHostEditorPresentation(host: host, isNewHost: false)
     }
 
     private func saveHost(_ host: SSHHost, connect: Bool) throws {

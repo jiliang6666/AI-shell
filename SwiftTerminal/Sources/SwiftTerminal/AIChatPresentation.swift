@@ -36,6 +36,7 @@ struct AIUsagePresentation: Equatable {
 
     let total: String
     let compactTotal: String
+    let cacheHitRate: Double?
     let rows: [Row]
     let modelRows: [Row]
 
@@ -50,10 +51,13 @@ struct AIUsagePresentation: Equatable {
         let rate: String
         if aggregator.envelopes.count != requestCount || !aggregator.canComputeHitRate {
             rate = "数据不完整"
-        } else if let value = aggregator.cacheHitRate {
-            rate = String(format: "%.1f%%", value * 100)
+            cacheHitRate = nil
+        } else if let hitRate = aggregator.cacheHitRate {
+            rate = String(format: "%.1f%%", hitRate * 100)
+            cacheHitRate = hitRate
         } else {
             rate = "不适用"
+            cacheHitRate = nil
         }
         rows = [
             Row(label: "提供方 / 模型", value: providers.isEmpty ? "未提供" : providers.joined(separator: "\n")),

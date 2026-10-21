@@ -1,4 +1,17 @@
+import Foundation
 import SwiftUI
+
+struct SSHHostEditorPresentation: Identifiable {
+    let id: UUID
+    let host: SSHHost
+    let isNewHost: Bool
+
+    init(host: SSHHost, isNewHost: Bool) {
+        id = UUID()
+        self.host = host
+        self.isNewHost = isNewHost
+    }
+}
 
 struct SSHHostEditor: View {
     @Environment(\.dismiss) private var dismiss

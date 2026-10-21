@@ -502,16 +502,26 @@ private struct AIUsageBadge: View {
 
     var body: some View {
         Button { showingDetails.toggle() } label: {
-            Label("用量 \(presentation?.compactTotal ?? (fallback.contains("统计中") ? "统计中…" : "未提供"))", systemImage: "cylinder")
+            Label(usageLabel, systemImage: "cylinder")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .padding(.horizontal, 9).padding(.vertical, 6)
                 .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("本轮用量，\(presentation?.total ?? fallback)，点击查看明细")
+        .accessibilityLabel("本轮用量，\(presentation?.total ?? fallback)，缓存命中率 \(cacheHitRateText ?? "未提供")，点击查看明细")
         .popover(isPresented: $showingDetails, arrowEdge: .bottom) {
             AIUsageDetailsCard(presentation: presentation, fallback: fallback)
         }
+    }
+
+    private var usageLabel: String {
+        let total = presentation?.compactTotal ?? (fallback.contains("统计中") ? "统计中…" : "未提供")
+        guard let cacheHitRateText else { return "用量 \(total)" }
+        return "用量 \(total) · 命中 \(cacheHitRateText)"
+    }
+
+    private var cacheHitRateText: String? {
+        presentation?.cacheHitRate.map { String(format: "%.1f%%", $0 * 100) }
     }
 }
 

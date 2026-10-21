@@ -26,6 +26,27 @@ final class SSHHostTests: XCTestCase {
         XCTAssertEqual(decoded.endpoint, "deploy@prod.example.com:2200")
     }
 
+    func testHostEditorPresentationRefreshesIdentityAndKeepsExistingHostData() {
+        let host = SSHHost(
+            name: "生产网关",
+            address: "prod.example.com",
+            username: "deploy",
+            port: 2200,
+            authentication: .privateKey,
+            privateKeyPath: "~/.ssh/prod_ed25519",
+            savePassword: false,
+            group: "生产环境",
+            remoteShell: "zsh"
+        )
+
+        let first = SSHHostEditorPresentation(host: host, isNewHost: false)
+        let next = SSHHostEditorPresentation(host: host, isNewHost: false)
+
+        XCTAssertNotEqual(first.id, next.id)
+        XCTAssertEqual(first.host, host)
+        XCTAssertFalse(first.isNewHost)
+    }
+
     func testFilterMatchesNameAddressUserAndGroup() {
         let hosts = [
             SSHHost(name: "生产网关", address: "10.0.0.2", username: "deploy", group: "生产"),

@@ -548,20 +548,6 @@ struct AIUsageDetailsCard: View {
                         }
                     }
                     .font(.system(size: 12))
-                    if !presentation.requestRows.isEmpty {
-                        Divider()
-                        Text("逐次请求缓存").font(.caption.weight(.medium))
-                        ForEach(presentation.requestRows) { row in
-                            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
-                                GridRow {
-                                    Text(row.label).foregroundStyle(.secondary)
-                                    Text(row.value).frame(maxWidth: .infinity, alignment: .trailing)
-                                        .multilineTextAlignment(.trailing).textSelection(.enabled)
-                                }
-                            }
-                            .font(.system(size: 11))
-                        }
-                    }
                     if presentation.modelRows.count > 1 {
                         Divider()
                         Text("按模型统计").font(.caption.weight(.medium))
@@ -590,16 +576,45 @@ struct AIContextPanel: View {
                     Spacer()
                     Button("完成") { dismiss() }.buttonStyle(.bordered)
                 }
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 10) {
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 9) {
                     GridRow {
                         Text("模型").foregroundStyle(.secondary)
                         Text(model.profile.model.isEmpty ? "未配置" : model.profile.model)
                     }
+                    GridRow {
+                        Text("容量").foregroundStyle(.secondary)
+                        Text(capacityText)
+                    }
+                    GridRow {
+                        Text("当前已用").foregroundStyle(.secondary)
+                        Text(usedText)
+                    }
+                    GridRow {
+                        Text("占容量比例").foregroundStyle(.secondary)
+                        Text(shareText)
+                    }
+                    GridRow {
+                        Text("压缩阈值").foregroundStyle(.secondary)
+                        Text(thresholdText)
+                    }
+                    GridRow {
+                        Text("可用输入预算").foregroundStyle(.secondary)
+                        Text(inputBudgetText)
+                    }
+                }
+                .font(.system(size: 12))
+                Divider()
+                Text("构成（估算）").font(.caption.weight(.medium))
+                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
                     ForEach(Array(model.contextComponentEstimates.enumerated()), id: \.offset) { _, component in
                         GridRow {
                             Text(component.name).foregroundStyle(.secondary)
-                            Text("约 \(component.tokens) tokens")
+                            Text("约 \(component.tokens) tok")
                         }
+                    }
+                    GridRow {
+                        Text("估算合计").foregroundStyle(.secondary)
+                        Text("约 \(model.estimatedContextInputTokens) tok")
                     }
                 }
                 .font(.system(size: 12))
@@ -612,13 +627,46 @@ struct AIContextPanel: View {
                             .lineLimit(6)
                     }
                 }
-                Text("以上为估算值。")
+                Text("「当前已用」取自上一次请求的服务端计费值；构成拆分为估算值，用于判断哪一部分在增长。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .padding(20)
         }
-        .frame(width: 320, height: 300)
+        .frame(width: 320, height: 420)
+    }
+
+    private var capacityText: String {
+        guard let capacity = model.contextBudget.capacity else { return "未设置" }
+        return "\(capacity.formatted()) tok"
+    }
+
+    private var usedText: String {
+        if let measured = model.measuredContext {
+            return "\(measured.inputTokens.formatted()) tok（上次请求实测）"
+        }
+        return "约 \(model.estimatedContextInputTokens.formatted()) tok（估算）"
+    }
+
+    private var shareText: String {
+        guard model.contextBudget.capacity != nil else { return "未设置容量" }
+        guard let share = model.measuredContextShare else { return "尚无请求数据" }
+        return String(format: "%.2f%%", share * 100)
+    }
+
+    private var thresholdText: String {
+        guard let threshold = model.contextThresholdTokens else { return "未设置" }
+        let ratio = Int((model.contextConfiguration.triggerRatio * 100).rounded())
+        return "\(threshold.formatted()) tok（可用输入预算的 \(ratio)%）"
+    }
+
+    private var inputBudgetText: String {
+        guard let budget = model.contextBudget.inputBudget else { return "未设置" }
+        var text = "\(budget.formatted()) tok"
+        if let reserve = model.contextBudget.reserve {
+            text += "（已扣输出预留 \(reserve.formatted())）"
+        }
+        return text
     }
 }
 

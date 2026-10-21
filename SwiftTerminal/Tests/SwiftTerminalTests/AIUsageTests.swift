@@ -49,15 +49,16 @@ func usageConflictsAndPartialDataAreIsolated() throws {
     #expect(partial?.counters.totalInput.value == nil)
 }
 
-@Test("Providers without a write counter keep the cache write unknown")
-func openAICompatibleUsageKeepsCacheWriteUnknown() throws {
+@Test("A gateway that reports no cache at all keeps every cache field unknown")
+func gatewayWithoutCacheInformationKeepsCacheFieldsUnknown() throws {
     let context = AIUsageRequestContext(provider: "openai_compatible", requestedModel: "gpt", profileID: UUID(), usageMapping: "openai_compatible")
     let envelope = AIUsageNormalizer.decode(
-        UsageWire(promptTokens: 1000, completionTokens: 80, totalTokens: 1080, cachedTokens: 400),
+        UsageWire(promptTokens: 1000, completionTokens: 80, totalTokens: 1080),
         context: context
     )
-    #expect(envelope?.counters.cacheRead.value == 400)
+    #expect(envelope?.counters.cacheRead.state == .unknown)
     #expect(envelope?.counters.cacheWrite.state == .unknown)
+    #expect(envelope?.counters.uncachedInput.state == .unknown)
 }
 
 @Test("Gateway cache fields are read from either the OpenAI or the Anthropic shape")
@@ -72,7 +73,6 @@ func gatewayCacheFieldsAreMapped() throws {
     #expect(anthropicStyle?.counters.uncachedInput.value == 400)
 
     // OpenAI style with a write counter reported next to the cached read.
-    let openAIWire = UsageWire(promptTokens: 1000, completionTokens: 80, totalTokens: 1080)
     let openAIJSON = """
     {"prompt_tokens":1000,"completion_tokens":80,"total_tokens":1080,\
     "prompt_tokens_details":{"cached_tokens":250,"cache_write_tokens":750}}
@@ -84,7 +84,23 @@ func gatewayCacheFieldsAreMapped() throws {
     #expect(openAI?.counters.cacheWrite.value == 750)
     #expect(openAI?.counters.cacheWrite.source == .provider)
     #expect(openAI?.counters.uncachedInput.value == 750)
-    _ = openAIWire
+}
+
+@Test("A gateway without a write counter derives it from the uncached remainder")
+func gatewayCacheWriteIsDerivedFromUncachedRemainder() throws {
+    let context = AIUsageRequestContext(provider: "openai_compatible", requestedModel: "gateway", profileID: UUID(), usageMapping: "openai_compatible")
+    let json = """
+    {"prompt_tokens":4000,"completion_tokens":120,"total_tokens":4120,\
+    "prompt_tokens_details":{"cached_tokens":3200}}
+    """
+    let envelope = AIUsageNormalizer.decode(
+        try JSONDecoder().decode(UsageWire.self, from: Data(json.utf8)), context: context
+    )
+    #expect(envelope?.counters.cacheRead.value == 3200)
+    #expect(envelope?.counters.uncachedInput.value == 800)
+    // The tokens that missed the cache were computed and then persisted.
+    #expect(envelope?.counters.cacheWrite.value == 800)
+    #expect(envelope?.counters.cacheWrite.source == .derived)
 }
 
 @Test("Aggregated cache hit rate uses token totals and not average request rates")

@@ -64,28 +64,6 @@ func usageCardKnownAndUnknownFields() throws {
     #expect(card.rows.first(where: { $0.label == "缓存读取" })?.value == "6,528 tok")
 }
 
-@Test("Usage card lists one cache line per request so a broken prefix is visible")
-func usageCardListsPerRequestCacheLines() throws {
-    func envelope(_ requestID: UUID, prompt: Int64, hit: Int64) throws -> AIUsageEnvelope {
-        try #require(AIUsageNormalizer.decode(
-            UsageWire(promptTokens: prompt, completionTokens: 10, totalTokens: prompt + 10,
-                      promptCacheHitTokens: hit, promptCacheMissTokens: prompt - hit),
-            context: AIUsageRequestContext(requestID: requestID, provider: "deepseek_chat",
-                                           requestedModel: "fixture-model", profileID: UUID(),
-                                           usageMapping: "deepseek_chat")))
-    }
-    var aggregator = AIUsageAggregator()
-    aggregator.add(try envelope(UUID(), prompt: 1_900, hit: 1_772))
-    aggregator.add(try envelope(UUID(), prompt: 6_001, hit: 640))
-    let card = AIUsagePresentation(aggregator: aggregator, requestCount: 2, modelRequestCounts: ["fixture-model": 2])
-    #expect(card.requestRows.count == 2)
-    #expect(card.requestRows[0].label == "#1")
-    #expect(card.requestRows[0].value.contains("命中 1.8K tok"))
-    #expect(card.requestRows[0].value.contains("93.3%"))
-    #expect(card.requestRows[1].value.contains("命中 640 tok"))
-    #expect(card.requestRows[1].value.contains("10.7%"))
-}
-
 @Test("Usage card marks missing-request coverage partial instead of presenting a complete total")
 func usageCardPartialCoverage() throws {
     let envelope = try #require(AIUsageNormalizer.decode(UsageWire(promptTokens: 10, completionTokens: 2, totalTokens: 12),

@@ -136,6 +136,14 @@ struct AIUsageRequestContext: Sendable {
     var usageMapping: String
 }
 
+/// The context size a provider actually billed for a request. It is the
+/// authoritative measure of how full the window is, while the estimator only
+/// predicts what the next request will cost.
+struct AIContextMeasurement: Equatable, Sendable {
+    var inputTokens: Int64
+    var cachedTokens: Int64
+}
+
 enum AIUsageNormalizer {
     static func metric(_ value: Int64?) -> AIMetricValue {
         guard let value else { return .unknown }
@@ -229,7 +237,15 @@ enum AIUsageNormalizer {
             } else {
                 result.cacheRead = metric(readFields.first)
             }
-            result.cacheWrite = metric(usage.cacheWriteTokens)
+            if let write = usage.cacheWriteTokens {
+                result.cacheWrite = metric(write)
+            } else if let prompt = usage.promptTokens, let cached = readFields.first,
+                      prompt >= 0, cached >= 0, prompt >= cached {
+                // No write counter: the tokens that missed the cache were
+                // computed and then persisted, so the uncached remainder is
+                // what this request wrote into the cache.
+                result.cacheWrite = derived(prompt - cached)
+            }
             if let prompt = usage.promptTokens, let cached = readFields.first,
                prompt >= 0, cached >= 0, prompt >= cached {
                 result.uncachedInput = metric(prompt - cached)

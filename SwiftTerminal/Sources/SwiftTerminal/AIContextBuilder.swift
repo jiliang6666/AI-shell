@@ -7,15 +7,24 @@ enum AIHistorySummary {
 }
 
 enum AIContextEstimator {
-    static let version = 2
+    static let version = 3
     static let messageOverhead: Int64 = 16
     static let toolSchemaOverhead: Int64 = 256
+
+    /// Tokens per character, fitted against the `prompt_tokens` the provider
+    /// reported for 136 real requests (0.377 per ASCII character, 0.908 per
+    /// non-ASCII character). The previous ASCII/3 and non-ASCII×1.5 guess
+    /// over-counted Chinese by about 1.7 times, so automatic compaction fired
+    /// while roughly a third of the window was still free.
+    static let asciiTokensPerCharacter = 0.377
+    static let nonASCIITokensPerCharacter = 0.908
 
     static func text(_ value: String) -> Int64 {
         let utf8 = Array(value.utf8)
         let asciiBytes = Int64(utf8.count(where: { $0 < 0x80 }))
         let nonASCIIScalars = Int64(value.unicodeScalars.count(where: { $0.value > 0x7f }))
-        let raw = (Double(asciiBytes) / 3.0) + (Double(nonASCIIScalars) * 1.5)
+        let raw = (Double(asciiBytes) * asciiTokensPerCharacter)
+            + (Double(nonASCIIScalars) * nonASCIITokensPerCharacter)
         return Int64(raw.rounded(.up))
     }
 

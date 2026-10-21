@@ -608,6 +608,21 @@ final class TerminalAIModel: ObservableObject {
             knownCapacity: nil
         )
     }
+    /// The context size the provider billed for the most recent request. It is
+    /// the authoritative number for "how full is the window"; the estimator
+    /// only predicts what the next request will cost.
+    var measuredContext: AIContextMeasurement? { latestContextMeasurement }
+    /// The estimated context size at which automatic compaction starts.
+    var contextThresholdTokens: Int64? {
+        guard let inputBudget = contextBudget.inputBudget else { return nil }
+        return Int64((Double(inputBudget) * contextConfiguration.triggerRatio).rounded(.up))
+    }
+    /// The share of the window the last request occupied, between 0 and 1.
+    var measuredContextShare: Double? {
+        guard let capacity = contextBudget.capacity, capacity > 0,
+              let measured = latestContextMeasurement else { return nil }
+        return Double(measured.inputTokens) / Double(capacity)
+    }
     var contextSummaryForDisplay: String? { contextSummary }
     private var queuedToolCalls: [ChatToolCall] = []
     private var savedProfileAtTurnStart: ModelProfile?
@@ -624,6 +639,7 @@ final class TerminalAIModel: ObservableObject {
     private var requestCountsByTurn: [UUID: Int] = [:]
     private var requestModelCountsByTurn: [UUID: [String: Int]] = [:]
     private var usageAggregators: [UUID: AIUsageAggregator] = [:]
+    private var latestContextMeasurement: AIContextMeasurement?
     private var turnTargetSnapshot: AITargetSnapshot?
     private var turnTerminalGeneration: UUID?
     private var activeToolRequestID: UUID?
@@ -2526,6 +2542,12 @@ final class TerminalAIModel: ObservableObject {
             usageMapping: mapping
         )
         guard var envelope = AIUsageNormalizer.decode(wire, context: context) else { return }
+        if let input = envelope.counters.totalInput.value {
+            latestContextMeasurement = AIContextMeasurement(
+                inputTokens: input,
+                cachedTokens: envelope.counters.cacheRead.value ?? 0
+            )
+        }
         if owner.isConversation, let turn = owner.turnID {
             var aggregator = usageAggregators[turn] ?? AIUsageAggregator()
             envelope = AIUsageSnapshotMerger.merge(

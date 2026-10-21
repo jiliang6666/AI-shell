@@ -2204,6 +2204,14 @@ final class TerminalAIModel: ObservableObject {
         request.timeoutInterval = AIHTTPStreamTimeoutPolicy.requestIdleInterval
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(profile.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue(Self.requestUserAgent, forHTTPHeaderField: "User-Agent")
+        if Self.requiresGatewaySessionHeader(url) {
+            // OpenCode Go routes and caches on a stable session id; without it
+            // the gateway refuses the request. The conversation id is stable
+            // for the whole chat, so every request of one conversation shares
+            // the same session.
+            request.setValue(conversationID.uuidString, forHTTPHeaderField: "x-opencode-session")
+        }
         let requestBody = try Self.makeRequestEncoder().encode(ChatRequest(model: profile.model, messages: messages, tools: tools ?? toolDefinitions, maxTokens: maxTokens))
         guard requestBody.count <= 4 * 1024 * 1024 else {
             throw ModelAPIError.badResponse("模型请求超过 4 MiB 上限；未发送请求。")
@@ -2846,6 +2854,21 @@ final class TerminalAIModel: ObservableObject {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return encoder
+    }
+
+    /// Identifies the application to the provider. Gateways that serve agent
+    /// traffic ask clients to name themselves instead of leaving a generic
+    /// HTTP library as the user agent.
+    static var requestUserAgent: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return "Zhanqiao/\(version ?? "1.0") (macOS terminal agent)"
+    }
+
+    /// OpenCode Go rejects requests that carry no session id, because it
+    /// routes and caches per session.
+    static func requiresGatewaySessionHeader(_ url: URL) -> Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host == "opencode.ai" || host.hasSuffix(".opencode.ai")
     }
 
     private func endpointURL(from baseURL: String) -> URL? {

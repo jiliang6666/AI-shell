@@ -47,7 +47,7 @@ func modelMenuSearchPreservesConfigurationIDs() {
     #expect(AIModelMenuOptions.groups(profiles: [a, b, c], query: "missing").isEmpty)
 }
 
-@Test("Usage card shows the reported total and keeps unknown cache writes unknown")
+@Test("Usage card shows the reported total and marks the derived cache write")
 func usageCardKnownAndUnknownFields() throws {
     let envelope = try #require(AIUsageNormalizer.decode(
         UsageWire(promptTokens: 7168, completionTokens: 445, totalTokens: 7613, promptCacheHitTokens: 6528, promptCacheMissTokens: 640),
@@ -59,8 +59,31 @@ func usageCardKnownAndUnknownFields() throws {
     #expect(card.compactTotal == "7.6K tok")
     #expect(card.cacheHitRate == 6528.0 / 7168.0)
     #expect(card.rows.first(where: { $0.label == "缓存命中" })?.value == "91.1%")
-    #expect(card.rows.first(where: { $0.label == "缓存写入" })?.value == "未提供")
+    #expect(card.rows.first(where: { $0.label == "缓存写入" })?.value == "640 tok（推算）")
     #expect(card.rows.first(where: { $0.label == "未缓存输入" })?.value == "640 tok")
+    #expect(card.rows.first(where: { $0.label == "缓存读取" })?.value == "6,528 tok")
+}
+
+@Test("Usage card lists one cache line per request so a broken prefix is visible")
+func usageCardListsPerRequestCacheLines() throws {
+    func envelope(_ requestID: UUID, prompt: Int64, hit: Int64) throws -> AIUsageEnvelope {
+        try #require(AIUsageNormalizer.decode(
+            UsageWire(promptTokens: prompt, completionTokens: 10, totalTokens: prompt + 10,
+                      promptCacheHitTokens: hit, promptCacheMissTokens: prompt - hit),
+            context: AIUsageRequestContext(requestID: requestID, provider: "deepseek_chat",
+                                           requestedModel: "fixture-model", profileID: UUID(),
+                                           usageMapping: "deepseek_chat")))
+    }
+    var aggregator = AIUsageAggregator()
+    aggregator.add(try envelope(UUID(), prompt: 1_900, hit: 1_772))
+    aggregator.add(try envelope(UUID(), prompt: 6_001, hit: 640))
+    let card = AIUsagePresentation(aggregator: aggregator, requestCount: 2, modelRequestCounts: ["fixture-model": 2])
+    #expect(card.requestRows.count == 2)
+    #expect(card.requestRows[0].label == "#1")
+    #expect(card.requestRows[0].value.contains("命中 1.8K tok"))
+    #expect(card.requestRows[0].value.contains("93.3%"))
+    #expect(card.requestRows[1].value.contains("命中 640 tok"))
+    #expect(card.requestRows[1].value.contains("10.7%"))
 }
 
 @Test("Usage card marks missing-request coverage partial instead of presenting a complete total")

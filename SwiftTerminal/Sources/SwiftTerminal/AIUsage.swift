@@ -37,6 +37,8 @@ struct UsageWire: Decodable, Equatable, Sendable {
     var promptCacheHitTokens: Int64?
     var promptCacheMissTokens: Int64?
     var cachedTokens: Int64?
+    var cacheReadInputTokens: Int64?
+    var cacheWriteTokens: Int64?
     var reasoningTokens: Int64?
 
     enum CodingKeys: String, CodingKey {
@@ -47,6 +49,7 @@ struct UsageWire: Decodable, Equatable, Sendable {
         case promptCacheMissTokens = "prompt_cache_miss_tokens"
         case promptTokensDetails = "prompt_tokens_details"
         case completionTokensDetails = "completion_tokens_details"
+        case cacheReadInputTokens = "cache_read_input_tokens"
     }
 
     init(
@@ -56,6 +59,8 @@ struct UsageWire: Decodable, Equatable, Sendable {
         promptCacheHitTokens: Int64? = nil,
         promptCacheMissTokens: Int64? = nil,
         cachedTokens: Int64? = nil,
+        cacheReadInputTokens: Int64? = nil,
+        cacheWriteTokens: Int64? = nil,
         reasoningTokens: Int64? = nil
     ) {
         self.promptTokens = promptTokens
@@ -64,6 +69,8 @@ struct UsageWire: Decodable, Equatable, Sendable {
         self.promptCacheHitTokens = promptCacheHitTokens
         self.promptCacheMissTokens = promptCacheMissTokens
         self.cachedTokens = cachedTokens
+        self.cacheReadInputTokens = cacheReadInputTokens
+        self.cacheWriteTokens = cacheWriteTokens
         self.reasoningTokens = reasoningTokens
     }
 
@@ -74,8 +81,10 @@ struct UsageWire: Decodable, Equatable, Sendable {
         totalTokens = try values.decodeIfPresent(Int64.self, forKey: .totalTokens)
         promptCacheHitTokens = try values.decodeIfPresent(Int64.self, forKey: .promptCacheHitTokens)
         promptCacheMissTokens = try values.decodeIfPresent(Int64.self, forKey: .promptCacheMissTokens)
+        cacheReadInputTokens = try values.decodeIfPresent(Int64.self, forKey: .cacheReadInputTokens)
         if let details = try? values.nestedContainer(keyedBy: DetailKeys.self, forKey: .promptTokensDetails) {
             cachedTokens = try details.decodeIfPresent(Int64.self, forKey: .cachedTokens)
+            cacheWriteTokens = try details.decodeIfPresent(Int64.self, forKey: .cacheWriteTokens)
         }
         if let details = try? values.nestedContainer(keyedBy: DetailKeys.self, forKey: .completionTokensDetails) {
             reasoningTokens = try details.decodeIfPresent(Int64.self, forKey: .reasoningTokens)
@@ -84,6 +93,7 @@ struct UsageWire: Decodable, Equatable, Sendable {
 
     private enum DetailKeys: String, CodingKey {
         case cachedTokens = "cached_tokens"
+        case cacheWriteTokens = "cache_write_tokens"
         case reasoningTokens = "reasoning_tokens"
     }
 }
@@ -107,6 +117,13 @@ struct AIRequestOwner: Codable, Equatable, Sendable {
     var stepIndex: Int?
     var purpose: String
     var attemptIndex: Int
+
+    static let conversationPurpose = "conversation"
+
+    /// Compaction posts its own summarisation prompt with no tools, so it
+    /// shares no prefix with the conversation. Counting it would report a
+    /// permanently uncacheable request inside the conversation's hit rate.
+    var isConversation: Bool { purpose == Self.conversationPurpose }
 }
 
 struct AIUsageRequestContext: Sendable {
@@ -124,6 +141,15 @@ enum AIUsageNormalizer {
         guard let value else { return .unknown }
         guard value >= 0 else { return conflict(nil) }
         return AIMetricValue(value: value, state: .known, source: .provider)
+    }
+
+    /// A value the provider does not report directly but that follows from the
+    /// numbers it does report. It is kept apart from provider-reported metrics
+    /// so the interface can label it as an estimate instead of a fact.
+    static func derived(_ value: Int64?) -> AIMetricValue {
+        guard let value else { return .unknown }
+        guard value >= 0 else { return conflict(nil) }
+        return AIMetricValue(value: value, state: .known, source: .derived)
     }
 
     static func conflict(_ value: Int64?) -> AIMetricValue {
@@ -176,6 +202,11 @@ enum AIUsageNormalizer {
                 result.cacheRead = metric(readValue)
             }
             result.uncachedInput = metric(usage.promptCacheMissTokens)
+            // DeepSeek reports no separate write counter. Every prompt token
+            // that missed the cache was computed and then persisted for later
+            // requests, so the miss total is what this request wrote into the
+            // disk cache.
+            result.cacheWrite = derived(usage.promptCacheMissTokens)
             result.totalInput = metric(usage.promptTokens)
             if let prompt = usage.promptTokens, let hit = usage.promptCacheHitTokens, let miss = usage.promptCacheMissTokens,
                prompt >= 0, hit >= 0, miss >= 0 {
@@ -184,15 +215,25 @@ enum AIUsageNormalizer {
                     result.totalInput = conflict(prompt)
                     result.cacheRead = conflict(hit)
                     result.uncachedInput = conflict(miss)
+                    result.cacheWrite = conflict(nil)
                 }
             }
         case "openai_compatible":
             result.totalInput = metric(usage.promptTokens)
-            result.cacheRead = metric(usage.cachedTokens)
-            if let prompt = usage.promptTokens, let cached = usage.cachedTokens,
+            // Gateways that keep a prompt cache report the cached read either
+            // in `prompt_tokens_details.cached_tokens` or in the Anthropic
+            // style `cache_read_input_tokens`.
+            let readFields = [usage.cachedTokens, usage.cacheReadInputTokens].compactMap { $0 }
+            if readFields.contains(where: { $0 < 0 }) || Set(readFields).count > 1 {
+                result.cacheRead = conflict(readFields.first)
+            } else {
+                result.cacheRead = metric(readFields.first)
+            }
+            result.cacheWrite = metric(usage.cacheWriteTokens)
+            if let prompt = usage.promptTokens, let cached = readFields.first,
                prompt >= 0, cached >= 0, prompt >= cached {
                 result.uncachedInput = metric(prompt - cached)
-            } else if usage.promptTokens != nil, usage.cachedTokens != nil {
+            } else if usage.promptTokens != nil, !readFields.isEmpty {
                 result.uncachedInput = conflict(nil)
             }
         default:

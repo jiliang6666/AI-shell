@@ -39,6 +39,8 @@ struct AIUsagePresentation: Equatable {
     let cacheHitRate: Double?
     let rows: [Row]
     let modelRows: [Row]
+    /// One row per request so a cache regression is visible while the agent runs.
+    let requestRows: [Row]
 
     init(aggregator: AIUsageAggregator, requestCount: Int, modelRequestCounts: [String: Int]) {
         let usage = aggregator.usage
@@ -78,6 +80,31 @@ struct AIUsagePresentation: Equatable {
             let count = modelRequestCounts[name] ?? grouped[name]?.count ?? 0
             return Row(label: name, value: "\(count) 次 · 输入 \(Self.metric(group.usage.totalInput, requestCount: count, reportedRequestCount: group.envelopes.count)) · 输出 \(Self.metric(group.usage.output, requestCount: count, reportedRequestCount: group.envelopes.count))")
         }
+        requestRows = aggregator.envelopes.enumerated().map { index, envelope in
+            Row(label: "#\(index + 1)", value: Self.requestCacheLine(envelope))
+        }
+    }
+
+    /// Per-request cache breakdown: input, cached read, uncached remainder and
+    /// the share that came out of the cache.
+    static func requestCacheLine(_ envelope: AIUsageEnvelope) -> String {
+        let counters = envelope.counters
+        var parts: [String] = []
+        if let input = counters.totalInput.value {
+            parts.append("输入 \(tokens(input, compact: true))")
+        }
+        if let read = counters.cacheRead.value {
+            parts.append("命中 \(tokens(read, compact: true))")
+        }
+        if let miss = counters.uncachedInput.value {
+            parts.append("未命中 \(tokens(miss, compact: true))")
+        }
+        guard !parts.isEmpty else { return "未提供" }
+        var line = parts.joined(separator: " · ")
+        if let input = counters.totalInput.value, let read = counters.cacheRead.value, input > 0, read >= 0, read <= input {
+            line += String(format: " · %.1f%%", Double(read) / Double(input) * 100)
+        }
+        return line
     }
 
     static func tokens(_ value: Int64, compact: Bool = false) -> String {
@@ -97,8 +124,10 @@ struct AIUsagePresentation: Equatable {
         case .unknown: return "未提供"
         case .known, .partial:
             guard let value = metric.value else { return "未提供" }
-            let text = tokens(value, compact: compact)
-            return metric.state == .partial ? text + "（部分，\(metric.knownRequestCount)/\(requestCount)次）" : text
+            var text = tokens(value, compact: compact)
+            if metric.state == .partial { text += "（部分，\(metric.knownRequestCount)/\(requestCount)次）" }
+            if metric.source == .derived { text += "（推算）" }
+            return text
         }
     }
 }

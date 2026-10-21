@@ -2204,7 +2204,7 @@ final class TerminalAIModel: ObservableObject {
         request.timeoutInterval = AIHTTPStreamTimeoutPolicy.requestIdleInterval
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(profile.apiKey)", forHTTPHeaderField: "Authorization")
-        let requestBody = try JSONEncoder().encode(ChatRequest(model: profile.model, messages: messages, tools: tools ?? toolDefinitions, maxTokens: maxTokens))
+        let requestBody = try Self.makeRequestEncoder().encode(ChatRequest(model: profile.model, messages: messages, tools: tools ?? toolDefinitions, maxTokens: maxTokens))
         guard requestBody.count <= 4 * 1024 * 1024 else {
             throw ModelAPIError.badResponse("模型请求超过 4 MiB 上限；未发送请求。")
         }
@@ -2228,7 +2228,7 @@ final class TerminalAIModel: ObservableObject {
             model: modelSnapshot,
             requestBody: requestBody
         )
-        if let turnID = owner.turnID {
+        if owner.isConversation, let turnID = owner.turnID {
             requestCountsByTurn[turnID, default: 0] += 1
             requestModelCountsByTurn[turnID, default: [:]][profile.model, default: 0] += 1
         }
@@ -2518,7 +2518,7 @@ final class TerminalAIModel: ObservableObject {
             usageMapping: mapping
         )
         guard var envelope = AIUsageNormalizer.decode(wire, context: context) else { return }
-        if let turn = owner.turnID {
+        if owner.isConversation, let turn = owner.turnID {
             var aggregator = usageAggregators[turn] ?? AIUsageAggregator()
             envelope = AIUsageSnapshotMerger.merge(
                 earlier: aggregator.envelopes.first(where: { $0.requestID == requestID }),
@@ -2558,10 +2558,12 @@ final class TerminalAIModel: ObservableObject {
         let usage = aggregator.usage
         func value(_ metric: AIMetricValue) -> String {
             switch metric.state {
-            case .known: metric.value.map(String.init) ?? "未提供"
-            case .partial: metric.value.map { "\($0)（部分，\(metric.knownRequestCount)/\(requestCount) 次请求有值）" } ?? "未提供"
-            case .conflict: "冲突"
-            case .unknown: "未提供"
+            case .known:
+                guard let number = metric.value else { return "未提供" }
+                return metric.source == .derived ? "\(number)（推算）" : "\(number)"
+            case .partial: return metric.value.map { "\($0)（部分，\(metric.knownRequestCount)/\(requestCount) 次请求有值）" } ?? "未提供"
+            case .conflict: return "冲突"
+            case .unknown: return "未提供"
             }
         }
         var lines = [
@@ -2827,6 +2829,23 @@ final class TerminalAIModel: ObservableObject {
 
     private static func usageMapping(for profile: ModelProfile) -> String {
         profile.baseURL.lowercased().contains("deepseek") ? "deepseek_chat" : "openai_compatible"
+    }
+
+    /// Encodes request bodies with a stable key order.
+    ///
+    /// Providers that cache the prompt prefix match on the tokens they build
+    /// from the request, and DeepSeek renders the tool schema using the key
+    /// order it received. `JSONEncoder` emits dictionary keys in hash order, so
+    /// the same schema can reach the provider with a different key order on
+    /// every request. That reshuffles the cached prefix and leaves only the
+    /// tokens before the first moved key eligible for a cache hit, which pins
+    /// the hit rate at a small constant no matter how long the conversation
+    /// grows. Sorting the keys makes the bytes reproducible, so an unchanged
+    /// prompt stays cacheable across requests and app launches.
+    private static func makeRequestEncoder() -> JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
     }
 
     private func endpointURL(from baseURL: String) -> URL? {

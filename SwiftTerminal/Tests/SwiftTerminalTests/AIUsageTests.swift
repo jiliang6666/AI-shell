@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import SwiftTerminal
 
-@Test("DeepSeek usage maps cache fields without inventing cache writes")
+@Test("DeepSeek usage maps cache fields and derives the cache write from the miss total")
 func deepSeekUsageMapsDisjointFields() throws {
     let payload = UsageWire(
         promptTokens: 1000,
@@ -16,7 +16,11 @@ func deepSeekUsageMapsDisjointFields() throws {
     #expect(envelope?.counters.totalInput.value == 1000)
     #expect(envelope?.counters.uncachedInput.value == 300)
     #expect(envelope?.counters.cacheRead.value == 700)
-    #expect(envelope?.counters.cacheWrite.state == .unknown)
+    #expect(envelope?.counters.cacheRead.source == .provider)
+    // DeepSeek reports no write counter: the miss total is what the request
+    // wrote into the disk cache, so it is recorded as a derived value.
+    #expect(envelope?.counters.cacheWrite.value == 300)
+    #expect(envelope?.counters.cacheWrite.source == .derived)
     #expect(envelope?.counters.output.value == 80)
     #expect(envelope?.counters.total.value == 1080)
     #expect(envelope?.completeness == .known)
@@ -35,12 +39,52 @@ func usageConflictsAndPartialDataAreIsolated() throws {
     let envelope = AIUsageNormalizer.decode(conflicting, context: context)
     #expect(envelope?.completeness == .conflict)
     #expect(envelope?.counters.output.value == 80)
-    #expect(envelope?.counters.cacheWrite.state == .unknown)
+    // The provider's own cache totals do not add up, so the derived write
+    // cannot be trusted either.
+    #expect(envelope?.counters.cacheWrite.state == .conflict)
 
     let partial = AIUsageNormalizer.decode(UsageWire(completionTokens: 80), context: context)
     #expect(partial?.completeness == .partial)
     #expect(partial?.counters.output.value == 80)
     #expect(partial?.counters.totalInput.value == nil)
+}
+
+@Test("Providers without a write counter keep the cache write unknown")
+func openAICompatibleUsageKeepsCacheWriteUnknown() throws {
+    let context = AIUsageRequestContext(provider: "openai_compatible", requestedModel: "gpt", profileID: UUID(), usageMapping: "openai_compatible")
+    let envelope = AIUsageNormalizer.decode(
+        UsageWire(promptTokens: 1000, completionTokens: 80, totalTokens: 1080, cachedTokens: 400),
+        context: context
+    )
+    #expect(envelope?.counters.cacheRead.value == 400)
+    #expect(envelope?.counters.cacheWrite.state == .unknown)
+}
+
+@Test("Gateway cache fields are read from either the OpenAI or the Anthropic shape")
+func gatewayCacheFieldsAreMapped() throws {
+    let context = AIUsageRequestContext(provider: "openai_compatible", requestedModel: "gateway", profileID: UUID(), usageMapping: "openai_compatible")
+    // Anthropic style: the cached read arrives at the top level.
+    let anthropicStyle = AIUsageNormalizer.decode(
+        UsageWire(promptTokens: 1000, completionTokens: 80, totalTokens: 1080, cacheReadInputTokens: 600),
+        context: context
+    )
+    #expect(anthropicStyle?.counters.cacheRead.value == 600)
+    #expect(anthropicStyle?.counters.uncachedInput.value == 400)
+
+    // OpenAI style with a write counter reported next to the cached read.
+    let openAIWire = UsageWire(promptTokens: 1000, completionTokens: 80, totalTokens: 1080)
+    let openAIJSON = """
+    {"prompt_tokens":1000,"completion_tokens":80,"total_tokens":1080,\
+    "prompt_tokens_details":{"cached_tokens":250,"cache_write_tokens":750}}
+    """
+    let openAI = AIUsageNormalizer.decode(
+        try JSONDecoder().decode(UsageWire.self, from: Data(openAIJSON.utf8)), context: context
+    )
+    #expect(openAI?.counters.cacheRead.value == 250)
+    #expect(openAI?.counters.cacheWrite.value == 750)
+    #expect(openAI?.counters.cacheWrite.source == .provider)
+    #expect(openAI?.counters.uncachedInput.value == 750)
+    _ = openAIWire
 }
 
 @Test("Aggregated cache hit rate uses token totals and not average request rates")

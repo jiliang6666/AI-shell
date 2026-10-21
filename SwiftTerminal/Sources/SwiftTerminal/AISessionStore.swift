@@ -1646,8 +1646,12 @@ extension AISessionStore {
     }
 
     private func aggregateRequests(_ requests: [StoredRequest]) -> AIUsageAggregate {
+        // Compaction posts its own summarisation prompt and never shares the
+        // conversation prefix, so it is excluded from the conversation's cache
+        // statistics instead of dragging the reported hit rate down.
+        let conversationRequests = requests.filter { $0.purpose == AIRequestOwner.conversationPurpose }
         var aggregator = AIUsageAggregator()
-        for request in requests {
+        for request in conversationRequests {
             if let envelope = request.envelope {
                 aggregator.add(envelope)
             }
@@ -1656,8 +1660,8 @@ extension AISessionStore {
             usage: aggregator.usage,
             envelopes: aggregator.envelopes,
             cacheHitRate: aggregator.cacheHitRate,
-            requestCount: requests.count,
-            modelRequestCounts: Dictionary(grouping: requests, by: \.requestedModel).mapValues(\.count)
+            requestCount: conversationRequests.count,
+            modelRequestCounts: Dictionary(grouping: conversationRequests, by: \.requestedModel).mapValues(\.count)
         )
     }
 

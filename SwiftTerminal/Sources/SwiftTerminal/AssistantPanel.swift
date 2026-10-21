@@ -548,6 +548,20 @@ struct AIUsageDetailsCard: View {
                         }
                     }
                     .font(.system(size: 12))
+                    if !presentation.requestRows.isEmpty {
+                        Divider()
+                        Text("逐次请求缓存").font(.caption.weight(.medium))
+                        ForEach(presentation.requestRows) { row in
+                            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 4) {
+                                GridRow {
+                                    Text(row.label).foregroundStyle(.secondary)
+                                    Text(row.value).frame(maxWidth: .infinity, alignment: .trailing)
+                                        .multilineTextAlignment(.trailing).textSelection(.enabled)
+                                }
+                            }
+                            .font(.system(size: 11))
+                        }
+                    }
                     if presentation.modelRows.count > 1 {
                         Divider()
                         Text("按模型统计").font(.caption.weight(.medium))

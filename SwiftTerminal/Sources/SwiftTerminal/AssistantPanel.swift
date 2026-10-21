@@ -608,7 +608,13 @@ struct AIContextPanel: View {
             }
             .padding(20)
         }
-        .frame(width: 320, height: 300)
+        .frame(width: 320, height: panelHeight, alignment: .top)
+    }
+
+    /// The four rows need little room; the compacted summary is the only part
+    /// that needs extra height.
+    private var panelHeight: CGFloat {
+        model.contextSummaryForDisplay?.isEmpty == false ? 280 : 160
     }
 
     private var capacityText: String {

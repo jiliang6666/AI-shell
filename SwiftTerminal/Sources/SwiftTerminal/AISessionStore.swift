@@ -1670,6 +1670,29 @@ extension AISessionStore {
         return aggregateRequests(try readRequests(sessionID: sessionID, turnID: turnID, in: database))
     }
 
+    /// The context size the provider billed for the most recent request of a
+    /// session. It is read back from the stored usage so the context panel
+    /// still shows the real window usage after a restart. The rows are removed
+    /// together with the session, so the measurement follows the same
+    /// lifecycle.
+    func latestContextUsage(sessionID: UUID) async throws -> AIContextMeasurement? {
+        let database = try open()
+        let statement = try database.prepare("""
+        SELECT usage_json FROM requests
+        WHERE session_id=? AND usage_json IS NOT NULL
+        ORDER BY rowid DESC LIMIT 1;
+        """)
+        try statement.bind(sessionID.uuidString, at: 1)
+        guard try statement.stepRow(),
+              let data = statement.data(0),
+              let envelope = try? decodeJSON(AIUsageEnvelope.self, data),
+              let input = envelope.counters.totalInput.value else { return nil }
+        return AIContextMeasurement(
+            inputTokens: input,
+            cachedTokens: envelope.counters.cacheRead.value ?? 0
+        )
+    }
+
     func usageForSession(sessionID: UUID) async throws -> AIUsageAggregate {
         let database = try open()
         return aggregateRequests(try readRequests(sessionID: sessionID, turnID: nil, in: database))

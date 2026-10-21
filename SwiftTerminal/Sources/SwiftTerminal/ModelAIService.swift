@@ -779,6 +779,11 @@ final class TerminalAIModel: ObservableObject {
             requestCountsByTurn[id] = aggregate.requestCount
             requestModelCountsByTurn[id] = aggregate.modelRequestCounts
         }
+        // The window usage is only known to the provider, so it is read back
+        // from the stored usage of the newest request of this session.
+        if let measured = try? await coordinator.store.latestContextUsage(sessionID: conversationID) {
+            latestContextMeasurement = measured
+        }
     }
 
     func updateWorkingDirectory(_ value: String) {

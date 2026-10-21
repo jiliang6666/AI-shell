@@ -60,8 +60,23 @@ func contextReportingExposesMeasuredUseAndThreshold() async throws {
     // Capacity 1,000,000: 8,192 output reserve, 50,000 safety, 941,808 input.
     #expect(model.contextBudget.capacity == 1_000_000)
     #expect(model.contextBudget.inputBudget == 941_808)
-    #expect(model.contextThresholdTokens == 753_447)
     // No request has run yet, so the measured window use is still unknown.
     #expect(model.measuredContext == nil)
     #expect(model.measuredContextShare == nil)
+}
+
+@Test("Context numbers use the compact k and m notation")
+func contextNumbersUseCompactNotation() {
+    #expect(AITokenFormat.capacity(1_000_000) == "1M")
+    #expect(AITokenFormat.capacity(32_768) == "32.8k")
+    #expect(AITokenFormat.capacity(1_500_000) == "1.5M")
+    #expect(AITokenFormat.capacity(900) == "900")
+    #expect(AITokenFormat.used(7_536) == "7.5kt")
+    #expect(AITokenFormat.used(753) == "753t")
+    #expect(AITokenFormat.used(1_234_567) == "1.2mt")
+    #expect(AITokenFormat.percent(0.007536) == "0.75%")
+    #expect(AITokenFormat.percent(0.053) == "5.3%")
+    #expect(AITokenFormat.percent(0.423) == "42.3%")
+    #expect(AITokenFormat.percent(0.8) == "80%")
+    #expect(AITokenFormat.percent(0.5) == "50%")
 }

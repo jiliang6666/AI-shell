@@ -1,5 +1,40 @@
 import Foundation
 
+/// Compact token notation for the context panel: a capacity reads "1M" or
+/// "32.8k", an amount of tokens reads "7.5kt" or "753t".
+enum AITokenFormat {
+    /// 1_000_000 -> "1M", 32_768 -> "32.8k", 900 -> "900"
+    static func capacity(_ value: Int64) -> String {
+        if value >= 1_000_000 { return trimmed(Double(value) / 1_000_000) + "M" }
+        if value >= 1_000 { return trimmed(Double(value) / 1_000) + "k" }
+        return "\(value)"
+    }
+
+    /// 1_234_567 -> "1.2mt", 7_536 -> "7.5kt", 753 -> "753t"
+    static func used(_ value: Int64) -> String {
+        if value >= 1_000_000 { return trimmed(Double(value) / 1_000_000) + "mt" }
+        if value >= 1_000 { return trimmed(Double(value) / 1_000) + "kt" }
+        return "\(value)t"
+    }
+
+    /// 0.8 -> "80%", 0.007536 -> "0.75%", 0.053 -> "5.3%", 0.423 -> "42.3%"
+    static func percent(_ fraction: Double) -> String {
+        let value = fraction * 100
+        var text = String(format: "%.*f", value < 1 ? 2 : 1, value)
+        if text.contains(".") {
+            while text.hasSuffix("0") { text.removeLast() }
+            if text.hasSuffix(".") { text.removeLast() }
+        }
+        return text + "%"
+    }
+
+    private static func trimmed(_ value: Double) -> String {
+        var text = String(format: "%.1f", value)
+        if text.hasSuffix(".0") { text = String(text.dropLast(2)) }
+        return text
+    }
+}
+
 struct AIModelMenuGroup: Identifiable {
     let id: String
     let title: String

@@ -586,39 +586,17 @@ struct AIContextPanel: View {
                         Text(capacityText)
                     }
                     GridRow {
-                        Text("当前已用").foregroundStyle(.secondary)
+                        Text("已使用").foregroundStyle(.secondary)
                         Text(usedText)
                     }
                     GridRow {
-                        Text("占容量比例").foregroundStyle(.secondary)
-                        Text(shareText)
-                    }
-                    GridRow {
-                        Text("压缩阈值").foregroundStyle(.secondary)
+                        Text("阈值").foregroundStyle(.secondary)
                         Text(thresholdText)
-                    }
-                    GridRow {
-                        Text("可用输入预算").foregroundStyle(.secondary)
-                        Text(inputBudgetText)
-                    }
-                }
-                .font(.system(size: 12))
-                Divider()
-                Text("构成（估算）").font(.caption.weight(.medium))
-                Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 7) {
-                    ForEach(Array(model.contextComponentEstimates.enumerated()), id: \.offset) { _, component in
-                        GridRow {
-                            Text(component.name).foregroundStyle(.secondary)
-                            Text("约 \(component.tokens) tok")
-                        }
-                    }
-                    GridRow {
-                        Text("估算合计").foregroundStyle(.secondary)
-                        Text("约 \(model.estimatedContextInputTokens) tok")
                     }
                 }
                 .font(.system(size: 12))
                 if let summary = model.contextSummaryForDisplay, !summary.isEmpty {
+                    Divider()
                     VStack(alignment: .leading, spacing: 5) {
                         Text("当前摘要").font(.caption.weight(.semibold))
                         Text(summary)
@@ -627,46 +605,28 @@ struct AIContextPanel: View {
                             .lineLimit(6)
                     }
                 }
-                Text("「当前已用」取自上一次请求的服务端计费值；构成拆分为估算值，用于判断哪一部分在增长。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .padding(20)
         }
-        .frame(width: 320, height: 420)
+        .frame(width: 320, height: 300)
     }
 
     private var capacityText: String {
         guard let capacity = model.contextBudget.capacity else { return "未设置" }
-        return "\(capacity.formatted()) tok"
+        return AITokenFormat.capacity(capacity)
     }
 
     private var usedText: String {
-        if let measured = model.measuredContext {
-            return "\(measured.inputTokens.formatted()) tok（上次请求实测）"
+        guard let measured = model.measuredContext else { return "—" }
+        var text = AITokenFormat.used(measured.inputTokens)
+        if let share = model.measuredContextShare {
+            text += " (\(AITokenFormat.percent(share)))"
         }
-        return "约 \(model.estimatedContextInputTokens.formatted()) tok（估算）"
-    }
-
-    private var shareText: String {
-        guard model.contextBudget.capacity != nil else { return "未设置容量" }
-        guard let share = model.measuredContextShare else { return "尚无请求数据" }
-        return String(format: "%.2f%%", share * 100)
+        return text
     }
 
     private var thresholdText: String {
-        guard let threshold = model.contextThresholdTokens else { return "未设置" }
-        let ratio = Int((model.contextConfiguration.triggerRatio * 100).rounded())
-        return "\(threshold.formatted()) tok（可用输入预算的 \(ratio)%）"
-    }
-
-    private var inputBudgetText: String {
-        guard let budget = model.contextBudget.inputBudget else { return "未设置" }
-        var text = "\(budget.formatted()) tok"
-        if let reserve = model.contextBudget.reserve {
-            text += "（已扣输出预留 \(reserve.formatted())）"
-        }
-        return text
+        AITokenFormat.percent(model.contextConfiguration.triggerRatio)
     }
 }
 

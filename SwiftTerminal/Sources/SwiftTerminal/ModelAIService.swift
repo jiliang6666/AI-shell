@@ -558,7 +558,7 @@ final class TerminalAIModel: ObservableObject {
         fillUnansweredCalls()
         return repaired
     }
-    var contextComponentEstimates: [(name: String, tokens: Int64)] {
+    private var contextComponentEstimates: [(name: String, tokens: Int64)] {
         let visible = modelVisibleMessages
         let systemPrompts = AIContextEstimator.messages([systemMessage, formattingMessage])
         let summaryTokens = contextSummary.map {
@@ -612,11 +612,6 @@ final class TerminalAIModel: ObservableObject {
     /// the authoritative number for "how full is the window"; the estimator
     /// only predicts what the next request will cost.
     var measuredContext: AIContextMeasurement? { latestContextMeasurement }
-    /// The estimated context size at which automatic compaction starts.
-    var contextThresholdTokens: Int64? {
-        guard let inputBudget = contextBudget.inputBudget else { return nil }
-        return Int64((Double(inputBudget) * contextConfiguration.triggerRatio).rounded(.up))
-    }
     /// The share of the window the last request occupied, between 0 and 1.
     var measuredContextShare: Double? {
         guard let capacity = contextBudget.capacity, capacity > 0,

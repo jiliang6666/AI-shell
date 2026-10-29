@@ -90,6 +90,7 @@ final class TerminalCommandDriver {
         proofSource: TerminalProofSource,
         timeout: TimeInterval = defaultTimeout,
         requiresSudoPassword: Bool = false,
+        allowsInteractiveInput: Bool = false,
         sudoPasswordProvider: (() -> String?)? = nil
     ) async -> TerminalRunOutcome {
         guard let terminal = view.terminal, view.process?.running == true else {
@@ -204,9 +205,10 @@ final class TerminalCommandDriver {
             // A dispatched command that sits at `Password:` would otherwise
             // burn the whole timeout. If this task holds a sudo password and
             // the command is sudo-based, feed it once; otherwise interrupt
-            // immediately with an actionable reason.
+            // immediately with an actionable reason. User-triggered quick
+            // commands leave the terminal available for manual password input.
             let now = ProcessInfo.processInfo.systemUptime
-            if now >= suppressPasswordCheckUntil,
+            if !allowsInteractiveInput, now >= suppressPasswordCheckUntil,
                Self.looksLikePasswordPrompt(terminal: terminal) {
                 // Try up to two stored passwords (the task's sudo password,
                 // then the SSH connection password — same login on most NAS

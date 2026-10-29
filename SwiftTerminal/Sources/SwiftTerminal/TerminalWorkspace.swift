@@ -219,6 +219,7 @@ struct TerminalWorkspace: View {
     @State private var sessionRestartTokens: [UUID: Int] = [:]
     @State private var assistantModels = AssistantModelRegistry.shared
     @State private var closingSessionIDs = Set<UUID>()
+    @State private var quickCommandRunningIDs = Set<UUID>()
 
     init() {
         let restored = TerminalSessionStore.load(hosts: SSHHostStore.load())
@@ -566,12 +567,6 @@ struct TerminalWorkspace: View {
                     Button("新建本机终端") { addSession(host: nil) }
                     Button("添加 SSH 主机…") { beginAddHost() }
                     Button("添加 SMB 共享…") { smbDraft = .init(name: "", server: "", share: "", username: "", password: "", mountPath: "") }
-                    if !hosts.isEmpty {
-                        Divider()
-                        ForEach(hosts) { host in
-                            Button("连接到 \(host.displayName)") { openHost(host) }
-                        }
-                    }
                     if !isSMBTarget, page == .terminal, sessions.count > 1 || splitSessionID != nil {
                         Divider()
                         ForEach(sessions.filter { $0.id != selectedSessionID }) { session in
@@ -611,9 +606,53 @@ struct TerminalWorkspace: View {
                         .contentShape(Rectangle())
                 }
                 .help("设置")
+
+                QuickCommandsMenu(
+                    targetName: isSMBTarget ? nil : selectedSession?.title,
+                    isRunning: selectedSession.map { quickCommandRunningIDs.contains($0.id) } ?? false,
+                    onRun: runQuickCommand
+                )
             }
             .padding(.horizontal, 8)
         }
+    }
+
+    // MARK: - Quick commands
+
+    private func runQuickCommand(_ command: String) -> String? {
+        guard !isSMBTarget, let session = selectedSession else { return "请先选择一个终端。" }
+        guard !closingSessionIDs.contains(session.id), !quickCommandRunningIDs.contains(session.id) else {
+            return "当前终端的命令仍在运行，请稍后再试。"
+        }
+        guard let live = terminalViews.liveTerminal(for: session.id), let terminal = live.view.terminal else {
+            return "当前终端尚未连接或已退出，请先连接终端。"
+        }
+        let markedProblem = TerminalRunReading.readinessProblem(
+            terminal: terminal, title: live.view.proofBox.currentTitle,
+            generation: live.view.connectionGeneration,
+            userTypedSincePrompt: live.view.proofBox.hasUserTypedSincePrompt
+        )
+        if markedProblem != nil, let problem = TerminalRunReading.unmarkedShellReadinessProblem(
+            terminal: terminal, title: live.view.proofBox.currentTitle,
+            userTypedSincePrompt: live.view.proofBox.hasUserTypedSincePrompt
+        ) {
+            return "终端尚未就绪，请等待命令结束并清空未提交的输入。\n\(problem)"
+        }
+        guard live.proofSource.supportsCompletionProof else { return "当前终端暂不支持快捷执行，请使用 bash 或 zsh 终端。" }
+        quickCommandRunningIDs.insert(session.id)
+        page = .terminal
+        DispatchQueue.main.async { live.view.window?.makeFirstResponder(live.view) }
+        Task {
+            defer { quickCommandRunningIDs.remove(session.id) }
+            let outcome = await TerminalCommandDriver.shared.run(
+                command, in: live.view, proofSource: live.proofSource,
+                allowsInteractiveInput: true
+            )
+            if outcome.unavailable {
+                errorMessage = "快捷命令未执行：\(outcome.unavailableReason ?? "终端不可用")"
+            }
+        }
+        return nil
     }
 
     // MARK: - Sidebar

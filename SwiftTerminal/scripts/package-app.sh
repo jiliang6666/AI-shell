@@ -21,9 +21,9 @@ RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 UPDATE_REPOSITORY="${ZHANQIAO_UPDATE_REPOSITORY:-jiliang6666/AI-shell}"
 UPDATE_PUBLIC_KEY="${ZHANQIAO_UPDATE_PUBLIC_KEY:-Fd2DQDZ/nrE3xmzNRzxaITrFvy4L4cfnFf5Y/pCTY44=}"
-APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.1}"
-APP_BUILD="${ZHANQIAO_APP_BUILD:-101}"
-UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-101}"
+APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.6}"
+APP_BUILD="${ZHANQIAO_APP_BUILD:-106}"
+UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-106}"
 UPDATE_FEED_URL=""
 case "$APP_VERSION" in ''|*[!0-9.]*) echo "Invalid ZHANQIAO_APP_VERSION." >&2; exit 2 ;; esac
 case "$APP_BUILD" in ''|*[!0-9]*) echo "Invalid ZHANQIAO_APP_BUILD." >&2; exit 2 ;; esac
@@ -115,6 +115,7 @@ elif [ "${NOTARIZE:-0}" = "1" ]; then
 else
     # The linker signature predates the bundle's Info.plist and resources.
     # Seal the finished bundle so local builds have a valid ad-hoc signature.
+    echo "Warning: ad-hoc signing can create a new Local Network privacy entry after rebuilds. Set SIGN_IDENTITY to an Apple-issued code-signing identity for stable SSH/NAS access." >&2
     codesign --force --sign - "$APP"
 fi
 codesign --verify --strict --deep "$APP"

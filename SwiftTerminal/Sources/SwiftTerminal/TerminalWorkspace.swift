@@ -1161,13 +1161,22 @@ struct TerminalWorkspace: View {
                         terminalViews.cancelSSHConnection(id: session.id)
                     } label: { Image(systemName: "xmark") }
                         .help("取消连接").accessibilityLabel("取消连接")
-                } else if state.canRetry {
-                    Button {
-                        exitedSessionIDs.remove(session.id)
-                        sshConnectionStates[session.id] = .connecting
-                        sessionRestartTokens[session.id, default: 0] += 1
-                    } label: { Image(systemName: "arrow.clockwise") }
-                        .help("重新连接").accessibilityLabel("重新连接")
+                } else {
+                    if case .failed(.networkPermission) = state {
+                        Button {
+                            LocalNetworkAccess.openSettings()
+                        } label: { Image(systemName: "gearshape") }
+                            .help("打开本地网络权限设置")
+                            .accessibilityLabel("打开本地网络权限设置")
+                    }
+                    if state.canRetry {
+                        Button {
+                            exitedSessionIDs.remove(session.id)
+                            sshConnectionStates[session.id] = .connecting
+                            sessionRestartTokens[session.id, default: 0] += 1
+                        } label: { Image(systemName: "arrow.clockwise") }
+                            .help("重新连接").accessibilityLabel("重新连接")
+                    }
                 }
             }
             .buttonStyle(.borderless)

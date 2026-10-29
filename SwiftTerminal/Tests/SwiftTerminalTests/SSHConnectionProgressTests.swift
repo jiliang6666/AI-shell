@@ -36,6 +36,15 @@ struct SSHConnectionProgressTests {
         #expect(SSHConnectionFailure.network.message(address: "192.168.1.10").contains("远程地址"))
     }
 
+    @Test func localNetworkPermissionFailureIsActionable() {
+        var progress = SSHConnectionProgress(generation: UUID(), expectsReadyMarker: true)
+        progress.receive("ssh: connect to host 192.168.18.6 port 22: Operation not permitted\r\n")
+        progress.finish()
+
+        #expect(progress.state == .failed(.networkPermission))
+        #expect(SSHConnectionFailure.networkPermission.message(address: "192.168.18.6").contains("本地网络"))
+    }
+
     @Test(arguments: [
         ("Permission denied (publickey,password).", SSHConnectionFailure.authentication),
         ("Host key verification failed.", SSHConnectionFailure.hostKey),

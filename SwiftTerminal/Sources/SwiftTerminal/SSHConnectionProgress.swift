@@ -26,10 +26,12 @@ enum SSHConnectionState: Equatable, Sendable {
 }
 
 enum SSHConnectionFailure: Equatable, Sendable {
-    case network, authentication, hostKey, other
+    case network, networkPermission, authentication, hostKey, other
 
     func message(address: String) -> String {
         switch self {
+        case .networkPermission:
+            "macOS 阻止了栈桥访问本地网络。请在“系统设置 → 隐私与安全 → 本地网络”中允许当前运行的栈桥副本，然后重试。"
         case .network:
             SSHConnectionPolicy.isPrivateIPv4(address)
                 ? "内网地址暂时不可达。请连接同一网络，或使用已配置的远程地址。"
@@ -72,7 +74,9 @@ struct SSHConnectionProgress {
         guard !state.canRetry, state != .connected else { return }
         startupOutput = String((startupOutput + text).suffix(4096))
         let output = startupOutput.lowercased()
-        if output.contains("connection timed out") || output.contains("operation timed out")
+        if output.contains("connect to host") && output.contains("operation not permitted") {
+            failure = .networkPermission
+        } else if output.contains("connection timed out") || output.contains("operation timed out")
             || output.contains("no route to host") || output.contains("network is unreachable")
             || output.contains("connection refused") || output.contains("could not resolve hostname") {
             failure = .network

@@ -192,6 +192,10 @@ private struct WorkspacePageNavigation: View {
 
 struct TerminalWorkspace: View {
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("sidebar.local.expanded") private var localSectionExpanded = true
+    @AppStorage("sidebar.ssh.expanded") private var sshSectionExpanded = true
+    @AppStorage("sidebar.smb.expanded") private var smbSectionExpanded = true
     @State private var sessions: [TerminalSession]
     @State private var selectedSessionID: UUID?
     @State private var hosts = SSHHostStore.load()
@@ -673,21 +677,23 @@ struct TerminalWorkspace: View {
     @ViewBuilder
     private var localTerminalSection: some View {
         VStack(alignment: .leading, spacing: 2) {
-            sidebarHeader("本机", systemImage: "laptopcomputer")
-            let localSessions = TerminalSessionPolicy.localSessions(sessions)
-            if localSessions.isEmpty {
-                Button {
-                    addSession(host: nil)
-                } label: {
-                    Label("新建本机终端", systemImage: "plus")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-            } else {
-                ForEach(localSessions) { session in
-                    sessionRow(session)
+            sidebarHeader("本机", systemImage: "laptopcomputer", isExpanded: $localSectionExpanded)
+            if localSectionExpanded {
+                let localSessions = TerminalSessionPolicy.localSessions(sessions)
+                if localSessions.isEmpty {
+                    Button {
+                        addSession(host: nil)
+                    } label: {
+                        Label("新建本机终端", systemImage: "plus")
+                            .font(.system(size: 12))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                } else {
+                    ForEach(localSessions) { session in
+                        sessionRow(session)
+                    }
                 }
             }
         }
@@ -697,33 +703,29 @@ struct TerminalWorkspace: View {
     private var smbSection: some View {
         let mounts = workspaceData.smbMounts
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                sidebarHeader("SMB", systemImage: "externaldrive")
-                Spacer()
-                Button { smbDraft = .init(name: "", server: "", share: "", username: "", password: "", mountPath: "") }
-                label: { Image(systemName: "plus") }
-                    .buttonStyle(.plain).help("添加 SMB 共享").padding(.trailing, 12)
-            }
-            if mounts.isEmpty {
-                Button("添加 SMB 共享") { smbDraft = .init(name: "", server: "", share: "", username: "", password: "", mountPath: "") }
-                    .buttonStyle(.plain).padding(.horizontal, 14).padding(.vertical, 6)
-            } else {
-                SSHHostListView(
-                    rows: mounts.map { mount in
-                        SSHHostRowModel(id: mount.id, name: mount.name,
-                                        endpoint: "\(smbCoordinator.label(for: mount)) · \(mount.server) / \(mount.share)",
-                                        isConnected: false, isSelected: sidebarSelection == .smb(mount.id), isSMB: true)
-                    },
-                    onActivate: { id in if let profile = mounts.first(where: { $0.id == id }) { selectSMB(profile) } },
-                    onEdit: { id in
-                        if let profile = mounts.first(where: { $0.id == id }), !smbCoordinator.busy.contains(id), smbCoordinator.volume(for: profile) == nil { smbDraft = profile }
-                        else { errorMessage = "请等待操作完成并卸载共享后，再编辑连接资料。" }
-                    },
-                    onDelete: { id in
-                        if let profile = mounts.first(where: { $0.id == id }), !smbCoordinator.busy.contains(id) { pendingSMBDelete = profile }
-                    }
-                )
-                .frame(height: CGFloat(mounts.count) * SSHHostListView.rowHeight)
+            sidebarHeader("SMB", systemImage: "externaldrive", isExpanded: $smbSectionExpanded)
+            if smbSectionExpanded {
+                if mounts.isEmpty {
+                    Button("添加 SMB 共享") { smbDraft = .init(name: "", server: "", share: "", username: "", password: "", mountPath: "") }
+                        .buttonStyle(.plain).padding(.horizontal, 14).padding(.vertical, 6)
+                } else {
+                    SSHHostListView(
+                        rows: mounts.map { mount in
+                            SSHHostRowModel(id: mount.id, name: mount.name,
+                                            endpoint: "\(smbCoordinator.label(for: mount)) · \(mount.server) / \(mount.share)",
+                                            isConnected: false, isSelected: sidebarSelection == .smb(mount.id), isSMB: true)
+                        },
+                        onActivate: { id in if let profile = mounts.first(where: { $0.id == id }) { selectSMB(profile) } },
+                        onEdit: { id in
+                            if let profile = mounts.first(where: { $0.id == id }), !smbCoordinator.busy.contains(id), smbCoordinator.volume(for: profile) == nil { smbDraft = profile }
+                            else { errorMessage = "请等待操作完成并卸载共享后，再编辑连接资料。" }
+                        },
+                        onDelete: { id in
+                            if let profile = mounts.first(where: { $0.id == id }), !smbCoordinator.busy.contains(id) { pendingSMBDelete = profile }
+                        }
+                    )
+                    .frame(height: CGFloat(mounts.count) * SSHHostListView.rowHeight)
+                }
             }
         }.padding(.top, 6)
     }
@@ -732,56 +734,78 @@ struct TerminalWorkspace: View {
     private var sshHostSection: some View {
         let entries = sshSidebarEntries
         VStack(alignment: .leading, spacing: 2) {
-            sidebarHeader("SSH", systemImage: "server.rack")
+            sidebarHeader("SSH", systemImage: "server.rack", isExpanded: $sshSectionExpanded)
 
-            if entries.isEmpty {
-                Button {
-                    beginAddHost()
-                } label: {
-                    Label("添加 SSH 主机", systemImage: "plus")
-                        .font(.system(size: 12))
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-            } else {
-                SSHHostListView(
-                    rows: entries.map { entry in
-                        SSHHostRowModel(
-                            id: entry.host.id,
-                            name: entry.host.displayName,
-                            endpoint: entry.host.endpoint,
-                            isConnected: entry.session.map { sshConnectionStates[$0.id] == .connected } ?? false,
-                            isSelected: entry.session.map { sidebarSelection == .session($0.id) } ?? false,
-                            connectionLabel: entry.session.map { sshConnectionStates[$0.id, default: .connecting].label }
-                        )
-                    },
-                    onActivate: { id in
-                        guard let host = hosts.first(where: { $0.id == id }) else { return }
-                        openHost(host)
-                    },
-                    onEdit: { id in
-                        guard let host = hosts.first(where: { $0.id == id }) else { return }
-                        beginEditHost(host)
-                    },
-                    onDelete: { id in
-                        guard let host = hosts.first(where: { $0.id == id }) else { return }
-                        pendingDelete = host
+            if sshSectionExpanded {
+                if entries.isEmpty {
+                    Button {
+                        beginAddHost()
+                    } label: {
+                        Label("添加 SSH 主机", systemImage: "plus")
+                            .font(.system(size: 12))
                     }
-                )
-                .frame(height: CGFloat(entries.count) * SSHHostListView.rowHeight)
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                } else {
+                    SSHHostListView(
+                        rows: entries.map { entry in
+                            SSHHostRowModel(
+                                id: entry.host.id,
+                                name: entry.host.displayName,
+                                endpoint: entry.host.endpoint,
+                                isConnected: entry.session.map { sshConnectionStates[$0.id] == .connected } ?? false,
+                                isSelected: entry.session.map { sidebarSelection == .session($0.id) } ?? false,
+                                connectionLabel: entry.session.map { sshConnectionStates[$0.id, default: .connecting].label }
+                            )
+                        },
+                        onActivate: { id in
+                            guard let host = hosts.first(where: { $0.id == id }) else { return }
+                            openHost(host)
+                        },
+                        onEdit: { id in
+                            guard let host = hosts.first(where: { $0.id == id }) else { return }
+                            beginEditHost(host)
+                        },
+                        onDelete: { id in
+                            guard let host = hosts.first(where: { $0.id == id }) else { return }
+                            pendingDelete = host
+                        }
+                    )
+                    .frame(height: CGFloat(entries.count) * SSHHostListView.rowHeight)
+                }
             }
         }
         .padding(.top, 6)
     }
 
-    private func sidebarHeader(_ title: String, systemImage: String) -> some View {
-        Label(title, systemImage: systemImage)
+    private func sidebarHeader(_ title: String, systemImage: String, isExpanded: Binding<Bool>) -> some View {
+        Button {
+            withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) {
+                isExpanded.wrappedValue.toggle()
+            }
+        } label: {
+            HStack(spacing: 6) {
+                Label(title, systemImage: systemImage)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .rotationEffect(.degrees(isExpanded.wrappedValue ? 90 : 0))
+                    .accessibilityHidden(true)
+            }
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 2)
+            .frame(minHeight: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 4)
+        .help("\(isExpanded.wrappedValue ? "收起" : "展开")\(title)")
+        .accessibilityLabel(title)
+        .accessibilityValue(isExpanded.wrappedValue ? "已展开" : "已收起")
+        .accessibilityHint("点击切换展开或收起")
+        .accessibilityIdentifier("sidebar.\(systemImage).disclosure")
     }
 
     private var sshSidebarEntries: [SSHHostSidebarEntry] {

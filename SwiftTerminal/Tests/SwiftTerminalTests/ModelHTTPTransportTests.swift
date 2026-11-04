@@ -282,6 +282,70 @@ func stopCancelsContinuedCommand() async throws {
     #expect(await transport.requestCount() == 2)
 }
 
+@Test("A new AI prompt starts cleanly after stopping a terminal command")
+@MainActor
+func newPromptAfterStoppingTerminalCommand() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("AIStopThenPrompt-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let (model, _, transport, _) = try await makeHTTPModel(directory: root, status: 200, retryAfter: nil)
+    defer { model.stop() }
+    #expect(await model.setPermission(.terminalOnly, sessionID: model.conversationID))
+    let generation = UUID()
+    model.terminalBindingProvider = {
+        TerminalBindingStatus(available: true, generation: generation, reason: nil)
+    }
+    var commandStarted = false
+    var cancellationReachedRunner = false
+    model.terminalCommandRunner = { proposal in
+        if proposal.id == "long-command" {
+            commandStarted = true
+            do {
+                try await Task.sleep(for: .seconds(60))
+            } catch {
+                cancellationReachedRunner = Task.isCancelled
+            }
+        }
+        return ShellCommandResult(output: "fixture", exitCode: 0, timedOut: false)
+    }
+    let toolJSON = String(decoding: try JSONSerialization.data(withJSONObject: [
+        "choices": [[
+            "delta": [
+                "tool_calls": [[
+                    "index": 0,
+                    "id": "long-command",
+                    "type": "function",
+                    "function": [
+                        "name": "run_command",
+                        "arguments": "{\"command\":\"sleep 60\",\"purpose\":\"fixture\"}"
+                    ]
+                ]]
+            ],
+            "finish_reason": "tool_calls"
+        ]]
+    ]), as: UTF8.self)
+    await transport.replaceResponses([
+        httpStreamResponse(status: 200, body: "data: \(toolJSON)\n\ndata: [DONE]\n\n")
+    ])
+    #expect(await model.send("Run the long fixture."))
+    let startDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !commandStarted, ContinuousClock.now < startDeadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    try #require(commandStarted)
+
+    model.stop()
+    await transport.replaceResponses([
+        httpStreamResponse(status: 200, body: "data: {\"choices\":[{\"delta\":{\"content\":\"after stop\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+    ])
+    #expect(await model.send("Start a new fixture."))
+    await model.waitForCurrentTurnCompletion()
+
+    #expect(cancellationReachedRunner)
+    #expect(model.errorMessage == nil)
+    #expect(model.messages.last?.content == "after stop")
+    #expect(await transport.requestCount() == 2)
+}
+
 @Test("Reloading or deleting library profiles never silently changes the conversation's model")
 @MainActor
 func modelLibraryReloadPreservesConversationSelection() async throws {

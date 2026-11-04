@@ -115,93 +115,99 @@ final class TerminalCommandDriver {
         }
         activeRuns.insert(generation)
         defer { activeRuns.remove(generation) }
+        view.prepareAIAutomation()
+        defer { view.finishAIAutomation() }
+        let interruptRelay = TerminalInterruptRelay(pane: view)
 
-        let readinessTimeout = AIReadinessTimeout.configured
-        let readinessStartedAt = ProcessInfo.processInfo.systemUptime
-        // A nested shell (for example sudo -i, su, or manually started SSH)
-        // has no pane-specific OSC 133 hooks. Fall back to the conservative
-        // unmarked-shell heuristic and a self-proving dispatch payload.
-        var unmarkedShell = false
-        while true {
-            let markedProblem = TerminalRunReading.readinessProblem(
-                terminal: terminal,
-                title: view.proofBox.currentTitle,
-                generation: proofSource.generation,
-                userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt
-            )
-            if markedProblem == nil {
-                break
+        return await withTaskCancellationHandler(operation: {
+            let readinessTimeout = AIReadinessTimeout.configured
+            let readinessStartedAt = ProcessInfo.processInfo.systemUptime
+            // A nested shell (for example sudo -i, su, or manually started SSH)
+            // has no pane-specific OSC 133 hooks. Fall back to the conservative
+            // unmarked-shell heuristic and a self-proving dispatch payload.
+            var unmarkedShell = false
+            while true {
+                let markedProblem = TerminalRunReading.readinessProblem(
+                    terminal: terminal,
+                    title: view.proofBox.currentTitle,
+                    generation: proofSource.generation,
+                    userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt,
+                    commandSubmittedSincePrompt: view.proofBox.hasSubmittedCommandSincePrompt
+                )
+                if markedProblem == nil {
+                    break
+                }
+                let unmarkedProblem = TerminalRunReading.unmarkedShellReadinessProblem(
+                    terminal: terminal,
+                    title: view.proofBox.currentTitle,
+                    userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt
+                )
+                if unmarkedProblem == nil {
+                    unmarkedShell = true
+                    break
+                }
+                if unmarkedProblem == TerminalRunReading.ambiguousContinuationPromptProblem {
+                    return TerminalRunOutcome(unavailable: true, unavailableReason: unmarkedProblem)
+                }
+                guard view.process?.running == true,
+                      view.connectionGeneration == generation,
+                      !Task.isCancelled,
+                      ProcessInfo.processInfo.systemUptime - readinessStartedAt < readinessTimeout else {
+                    return TerminalRunOutcome(unavailable: true,
+                        unavailableReason: "等待 \(Int(readinessTimeout)) 秒未就绪（\(unmarkedProblem ?? markedProblem ?? "原因未知")）")
+                }
+                try? await Task.sleep(for: pollInterval)
             }
-            let unmarkedProblem = TerminalRunReading.unmarkedShellReadinessProblem(
-                terminal: terminal,
-                title: view.proofBox.currentTitle,
-                userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt
-            )
-            if unmarkedProblem == nil {
-                unmarkedShell = true
-                break
+            guard !Task.isCancelled, view.connectionGeneration == generation else {
+                return TerminalRunOutcome(unavailable: true, unavailableReason: "命令已取消或终端会话已变更，未派发")
             }
-            if unmarkedProblem == TerminalRunReading.ambiguousContinuationPromptProblem {
-                return TerminalRunOutcome(unavailable: true, unavailableReason: unmarkedProblem)
-            }
-            guard view.process?.running == true,
-                  view.connectionGeneration == generation,
-                  !Task.isCancelled,
-                  ProcessInfo.processInfo.systemUptime - readinessStartedAt < readinessTimeout else {
-                return TerminalRunOutcome(unavailable: true,
-                    unavailableReason: "等待 \(Int(readinessTimeout)) 秒未就绪（\(unmarkedProblem ?? markedProblem ?? "原因未知")）")
-            }
-            try? await Task.sleep(for: pollInterval)
-        }
-        guard !Task.isCancelled, view.connectionGeneration == generation else {
-            return TerminalRunOutcome(unavailable: true, unavailableReason: "命令已取消或终端会话已变更，未派发")
-        }
 
-        let lastContentRowBefore = lastContentRow(in: terminal)
-        let rowsTrimmedAtStart = terminal.buffer.totalLinesTrimmed
-        let wrapperNonce = UUID().uuidString.lowercased()
-        let usesLocalShellHooks: Bool = {
-            guard !unmarkedShell, !command.isEmpty else { return false }
-            if case .statusFile = proofSource { return true }
-            return false
-        }()
-        let startSequence = view.proofBox.latestStartSequence
-        var completionNonce: String? = usesLocalShellHooks ? nil : wrapperNonce
-        if case .statusFile(let statusFile, _) = proofSource {
-            try? FileManager.default.removeItem(at: statusFile)
-        }
-        defer {
-            if let completionNonce, case .statusFile(let statusFile, _) = proofSource {
-                try? FileManager.default.removeItem(at: statusFile.appendingPathExtension("\(completionNonce).tmp"))
+            let lastContentRowBefore = lastContentRow(in: terminal)
+            let rowsTrimmedAtStart = terminal.buffer.totalLinesTrimmed
+            let wrapperNonce = UUID().uuidString.lowercased()
+            let usesLocalShellHooks: Bool = {
+                guard !unmarkedShell, !command.isEmpty else { return false }
+                if case .statusFile = proofSource { return true }
+                return false
+            }()
+            let startSequence = view.proofBox.latestStartSequence
+            var completionNonce: String? = usesLocalShellHooks ? nil : wrapperNonce
+            if case .statusFile(let statusFile, _) = proofSource {
+                try? FileManager.default.removeItem(at: statusFile)
             }
-        }
-        var payload: [UInt8]
-        if usesLocalShellHooks {
-            payload = TerminalCommandEnvelope.inputPayload(command)
-        } else {
-            let wrapped = unmarkedShell
-                ? TerminalCommandEnvelope.wrapSelfProving(command, nonce: wrapperNonce)
-                : TerminalCommandEnvelope.wrap(command, nonce: wrapperNonce)
-            payload = Array(wrapped.utf8)
-        }
-        payload.append(Self.submitByte)
-        view.sendAIDispatch(payload[...])
+            defer {
+                if let completionNonce, case .statusFile(let statusFile, _) = proofSource {
+                    try? FileManager.default.removeItem(at: statusFile.appendingPathExtension("\(completionNonce).tmp"))
+                }
+            }
+            var payload: [UInt8]
+            if usesLocalShellHooks {
+                payload = TerminalCommandEnvelope.inputPayload(command)
+            } else {
+                let wrapped = unmarkedShell
+                    ? TerminalCommandEnvelope.wrapSelfProving(command, nonce: wrapperNonce)
+                    : TerminalCommandEnvelope.wrap(command, nonce: wrapperNonce)
+                payload = Array(wrapped.utf8)
+            }
+            payload.append(Self.submitByte)
+            view.markAIAutomationDispatched()
+            view.sendAIDispatch(payload[...])
 
-        let startedAt = ProcessInfo.processInfo.systemUptime
-        let idleLimit = max(8, timeout / 3)
-        var lastActivityAt = startedAt
-        var lastOutputSignature = Self.outputSignature(terminal)
-        var proof: TerminalCompletionProof?
-        var returnedToPrompt = false
-        var started = false
-        var sudoPasswordAttempts = 0
-        var lastSentSudoPassword: String?
-        var suppressPasswordCheckUntil: TimeInterval = 0
-        var interruptedReason: String?
-        while !returnedToPrompt {
-            try? await Task.sleep(for: pollInterval)
-            guard !Task.isCancelled, view.process?.running == true,
-                  view.connectionGeneration == generation else { break }
+            let startedAt = ProcessInfo.processInfo.systemUptime
+            let idleLimit = max(8, timeout / 3)
+            var lastActivityAt = startedAt
+            var lastOutputSignature = Self.outputSignature(terminal)
+            var proof: TerminalCompletionProof?
+            var returnedToPrompt = false
+            var started = false
+            var sudoPasswordAttempts = 0
+            var lastSentSudoPassword: String?
+            var suppressPasswordCheckUntil: TimeInterval = 0
+            var interruptedReason: String?
+            while !returnedToPrompt {
+                try? await Task.sleep(for: pollInterval)
+                guard !Task.isCancelled, view.process?.running == true,
+                      view.connectionGeneration == generation else { break }
             // A dispatched command that sits at `Password:` would otherwise
             // burn the whole timeout. If this task holds a sudo password and
             // the command is sudo-based, feed it once; otherwise interrupt
@@ -269,7 +275,8 @@ final class TerminalCommandDriver {
                     userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt) == nil
                 : TerminalRunReading.isReady(
                     terminal: terminal, title: title, generation: generation,
-                    userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt))
+                    userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt,
+                    commandSubmittedSincePrompt: view.proofBox.hasSubmittedCommandSincePrompt))
             if ProcessInfo.processInfo.systemUptime - startedAt >= timeout {
                 interruptedReason = Self.timeoutDiagnostic(
                     terminal: terminal, title: view.proofBox.currentTitle,
@@ -279,60 +286,65 @@ final class TerminalCommandDriver {
             }
         }
 
-        var timedOut = !returnedToPrompt
-        if timedOut, interruptedReason == nil,
-           started && proof == nil && view.connectionGeneration == generation {
-            interruptedReason = "命令在超时内未返回完成证明"
-        }
-        if timedOut, view.connectionGeneration == generation {
-            // Leave the session usable instead of wedged on a hung command.
-            view.sendAIDispatch([Self.interruptByte][...])
-            var settleDeadline = ProcessInfo.processInfo.systemUptime + 2
-            while ProcessInfo.processInfo.systemUptime < settleDeadline {
-                try? await Task.sleep(for: pollInterval)
-                let title = view.proofBox.currentTitle
-                let settled = unmarkedShell
-                    ? TerminalRunReading.unmarkedShellReadinessProblem(
-                        terminal: terminal, title: title,
-                        userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt) == nil
-                    : TerminalRunReading.isReady(
-                        terminal: terminal, title: title, generation: generation,
-                        userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt)
-                if settled { returnedToPrompt = true; break }
+            let timedOut = !returnedToPrompt
+            if timedOut, interruptedReason == nil,
+               started && proof == nil && view.connectionGeneration == generation {
+                interruptedReason = "命令在超时内未返回完成证明"
             }
-            if !returnedToPrompt {
-                // The program may ignore SIGINT; one more attempt, then report
-                // the terminal state honestly.
-                view.sendAIDispatch([Self.interruptByte][...])
-                try? await Task.sleep(for: .milliseconds(600))
-                if let terminal2 = view.terminal {
-                    returnedToPrompt = unmarkedShell
+            if timedOut, view.connectionGeneration == generation {
+                // Leave the session usable instead of wedged on a hung command.
+                view.interruptAIAutomation()
+                var settleDeadline = ProcessInfo.processInfo.systemUptime + 2
+                while ProcessInfo.processInfo.systemUptime < settleDeadline {
+                    try? await Task.sleep(for: pollInterval)
+                    let title = view.proofBox.currentTitle
+                    let settled = unmarkedShell
                         ? TerminalRunReading.unmarkedShellReadinessProblem(
-                            terminal: terminal2, title: view.proofBox.currentTitle,
+                            terminal: terminal, title: title,
                             userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt) == nil
                         : TerminalRunReading.isReady(
-                            terminal: terminal2, title: view.proofBox.currentTitle,
-                            generation: generation,
-                            userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt)
+                            terminal: terminal, title: title, generation: generation,
+                            userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt,
+                            commandSubmittedSincePrompt: view.proofBox.hasSubmittedCommandSincePrompt)
+                    if settled { returnedToPrompt = true; break }
                 }
+                if !returnedToPrompt, !Task.isCancelled {
+                    // The program may ignore SIGINT; one more attempt, then report
+                    // the terminal state honestly.
+                    view.retryInterruptAIAutomation()
+                    try? await Task.sleep(for: .milliseconds(600))
+                    if let terminal2 = view.terminal {
+                        returnedToPrompt = unmarkedShell
+                            ? TerminalRunReading.unmarkedShellReadinessProblem(
+                                terminal: terminal2, title: view.proofBox.currentTitle,
+                                userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt) == nil
+                            : TerminalRunReading.isReady(
+                                terminal: terminal2, title: view.proofBox.currentTitle,
+                                generation: generation,
+                                userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt,
+                                commandSubmittedSincePrompt: view.proofBox.hasSubmittedCommandSincePrompt)
+                    }
+                }
+                settleDeadline = 0
             }
-            settleDeadline = 0
-        }
 
-        let outcome = TerminalRunReading.extract(
-            terminal: terminal,
-            afterRow: lastContentRowBefore,
-            promptBoundary: nil,
-            timedOut: timedOut,
-            rowsTrimmedAtStart: rowsTrimmedAtStart
-        )
+            let outcome = TerminalRunReading.extract(
+                terminal: terminal,
+                afterRow: lastContentRowBefore,
+                promptBoundary: nil,
+                timedOut: timedOut,
+                rowsTrimmedAtStart: rowsTrimmedAtStart
+            )
 
-        var result = outcome
-        result.exitStatus = proof?.exitStatus
-        result.timedOut = timedOut
-        result.returnedToPrompt = returnedToPrompt
-        result.interruptedReason = interruptedReason
-        return result
+            var result = outcome
+            result.exitStatus = proof?.exitStatus
+            result.timedOut = timedOut
+            result.returnedToPrompt = returnedToPrompt
+            result.interruptedReason = interruptedReason
+            return result
+        }, onCancel: {
+            interruptRelay.request()
+        })
     }
 
     // MARK: - Terminal inspection
@@ -347,7 +359,6 @@ final class TerminalCommandDriver {
         var parts: [String] = []
         parts.append(proofArrived ? "完成证明已到达但提示符未恢复" : "未收到完成证明")
         parts.append("标题=\(title.isEmpty ? "空" : title)")
-        let rows = terminal.getDims().rows
         let count = TerminalRunReading.lineCount(terminal)
         var shown = 0
         var row = count - 1
@@ -402,6 +413,28 @@ final class TerminalCommandDriver {
     }
 
 
+}
+
+private final class TerminalInterruptRelay: @unchecked Sendable {
+    private let pane: TerminalPaneView
+
+    init(pane: TerminalPaneView) {
+        self.pane = pane
+    }
+
+    func request() {
+        if Thread.isMainThread {
+            _ = MainActor.assumeIsolated {
+                pane.interruptAIAutomation()
+            }
+        } else {
+            DispatchQueue.main.async { [pane] in
+                _ = MainActor.assumeIsolated {
+                    pane.interruptAIAutomation()
+                }
+            }
+        }
+    }
 }
 
 /// Submit one complete shell statement. Raw multiline input runs each line
@@ -469,10 +502,12 @@ __swiftterminal_end() {
 enum TerminalRunReading {
     static func isReady(
         terminal: Terminal, title: String?, generation: UUID,
-        userTypedSincePrompt: Bool
+        userTypedSincePrompt: Bool,
+        commandSubmittedSincePrompt: Bool = false
     ) -> Bool {
         readinessProblem(terminal: terminal, title: title, generation: generation,
-            userTypedSincePrompt: userTypedSincePrompt) == nil
+            userTypedSincePrompt: userTypedSincePrompt,
+            commandSubmittedSincePrompt: commandSubmittedSincePrompt) == nil
     }
 
     /// Explains which readiness condition failed. The prompt path has several
@@ -480,8 +515,12 @@ enum TerminalRunReading {
     /// and the transcript guessing which one broke.
     static func readinessProblem(
         terminal: Terminal, title: String?, generation: UUID,
-        userTypedSincePrompt: Bool
+        userTypedSincePrompt: Bool,
+        commandSubmittedSincePrompt: Bool = false
     ) -> String? {
+        guard !commandSubmittedSincePrompt else {
+            return "上一命令仍在运行，尚未返回新的提示符"
+        }
         let expected = "__SWIFTTERMINAL_READY=\(generation.uuidString.lowercased())"
         guard title == expected else {
             return "终端标题未报告就绪（当前标题：\(title?.isEmpty == false ? title! : "空")）"

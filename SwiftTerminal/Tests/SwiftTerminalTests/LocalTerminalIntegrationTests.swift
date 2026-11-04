@@ -75,6 +75,142 @@ func terminalDriverWaitsForCommandBody(_ useTitleProof: Bool) async throws {
     #expect(reuse.output.replacingOccurrences(of: "\n", with: "").contains(startup.resolvingSymlinksInPath().path))
 }
 
+@Test("Stopping an AI command leaves the terminal ready for immediate manual input", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
+@MainActor
+func cancelledAITerminalCommandKeepsManualInput() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("TerminalStopInput-\(UUID())")
+    let startup = root.appendingPathComponent("user-startup")
+    try FileManager.default.createDirectory(at: startup, withIntermediateDirectories: true)
+    let pane = TerminalPaneView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+    defer {
+        if pane.process?.running == true { pane.terminate() }
+        try? FileManager.default.removeItem(at: root)
+    }
+    pane.installProcessDelegate()
+    let integration = try #require(ZshShellIntegration.prepare(
+        generation: pane.connectionGeneration,
+        directory: root.appendingPathComponent("integration"),
+        userStartupDirectory: startup.path
+    ))
+    let status = root.appendingPathComponent("status")
+    let environment = integration.environment + [
+        "TERM=xterm-256color",
+        "LANG=en_US.UTF-8",
+        "PATH=/usr/bin:/bin",
+        "HISTFILE=",
+        "SWIFTTERMINAL_EXIT_STATUS_FILE=\(status.path)"
+    ]
+    pane.startProcess(
+        executable: "/bin/zsh",
+        args: ["-i"],
+        environment: environment,
+        execName: nil,
+        currentDirectory: root.path
+    )
+    let source = TerminalProofSource.statusFile(status, generation: pane.connectionGeneration)
+    let driver = TerminalCommandDriver()
+    let started = root.appendingPathComponent("started")
+    let run = Task {
+        await driver.run(
+            "/usr/bin/touch '\(started.path)'; while :; do /bin/sleep 1; done",
+            in: pane,
+            proofSource: source
+        )
+    }
+    defer { run.cancel() }
+    let startDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while !FileManager.default.fileExists(atPath: started.path), ContinuousClock.now < startDeadline {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    try #require(FileManager.default.fileExists(atPath: started.path))
+
+    run.cancel()
+    pane.send(source: pane, data: Array("printf 'MANUAL_AFTER_STOP_OK\\n'\r".utf8)[...])
+
+    let terminal = try #require(pane.terminal)
+    let outputDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    var manualCommandRan = false
+    while ContinuousClock.now < outputDeadline, !manualCommandRan {
+        try await Task.sleep(for: .milliseconds(40))
+        manualCommandRan = (0..<TerminalRunReading.lineCount(terminal)).contains { row in
+            TerminalRunReading.lineText(terminal, row: row)?.contains("MANUAL_AFTER_STOP_OK") == true
+        }
+    }
+    _ = await run.value
+    #expect(manualCommandRan)
+}
+
+@Test("Cancelling before AI dispatch does not interrupt a user's foreground command", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
+@MainActor
+func cancelledBeforeAIDispatchKeepsUserCommandRunning() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("TerminalCancelBeforeDispatch-\(UUID())")
+    let startup = root.appendingPathComponent("user-startup")
+    try FileManager.default.createDirectory(at: startup, withIntermediateDirectories: true)
+    let pane = TerminalPaneView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+    defer {
+        if pane.process?.running == true { pane.terminate() }
+        try? FileManager.default.removeItem(at: root)
+    }
+    pane.installProcessDelegate()
+    let integration = try #require(ZshShellIntegration.prepare(
+        generation: pane.connectionGeneration,
+        directory: root.appendingPathComponent("integration"),
+        userStartupDirectory: startup.path
+    ))
+    let status = root.appendingPathComponent("status")
+    let environment = integration.environment + [
+        "TERM=xterm-256color",
+        "LANG=en_US.UTF-8",
+        "PATH=/usr/bin:/bin",
+        "HISTFILE=",
+        "SWIFTTERMINAL_EXIT_STATUS_FILE=\(status.path)"
+    ]
+    pane.startProcess(
+        executable: "/bin/zsh",
+        args: ["-i"],
+        environment: environment,
+        execName: nil,
+        currentDirectory: root.path
+    )
+    let source = TerminalProofSource.statusFile(status, generation: pane.connectionGeneration)
+    let driver = TerminalCommandDriver()
+    let started = root.appendingPathComponent("user-command-started")
+    let release = root.appendingPathComponent("release-user-command")
+    let completed = root.appendingPathComponent("user-command-completed")
+    pane.send(source: pane, data: Array("""
+    /bin/sh -c '/usr/bin/touch "\(started.path)"; while [ ! -e "\(release.path)" ]; do /bin/sleep 0.02; done; /usr/bin/touch "\(completed.path)"'
+    \r
+    """.utf8)[...])
+    let startDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+    while !FileManager.default.fileExists(atPath: started.path), ContinuousClock.now < startDeadline {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+    try #require(FileManager.default.fileExists(atPath: started.path))
+
+    let aiRun = Task {
+        await driver.run("printf 'AI_DISPATCH_SHOULD_NOT_RUN\\n'", in: pane, proofSource: source)
+    }
+    try await Task.sleep(for: .milliseconds(150))
+    aiRun.cancel()
+    _ = await aiRun.value
+    try await Task.sleep(for: .milliseconds(300))
+    #expect(!FileManager.default.fileExists(atPath: completed.path))
+
+    let terminal = try #require(pane.terminal)
+    try Data().write(to: release)
+    let outputDeadline = ContinuousClock.now.advanced(by: .seconds(4))
+    var manualCommandFinished = false
+    while ContinuousClock.now < outputDeadline, !manualCommandFinished {
+        try await Task.sleep(for: .milliseconds(40))
+        manualCommandFinished = FileManager.default.fileExists(atPath: completed.path)
+    }
+    #expect(manualCommandFinished)
+    let terminalText = (0..<TerminalRunReading.lineCount(terminal))
+        .compactMap { TerminalRunReading.lineText(terminal, row: $0) }
+        .joined(separator: "\n")
+    #expect(!terminalText.contains("AI_DISPATCH_SHOULD_NOT_RUN"))
+}
+
 @Test("Local zsh PTY runs through the real driver and rolls back its shell integration", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
 @MainActor
 func localTerminalPTYExecutionAndRollback() async throws {
@@ -312,6 +448,71 @@ func isolatedSSHDriverCompletionForBashAndZsh() async throws {
         #expect(nonzero.exitStatus == 7)
         #expect(nonzero.returnedToPrompt)
         #expect(nonzero.output.contains("SSH_BODY_FINISHED"))
+        let terminal = try #require(pane.terminal)
+        let beforeDispatchStarted = home.appendingPathComponent("before-dispatch-started-\(remoteShell)")
+        let beforeDispatchRelease = home.appendingPathComponent("before-dispatch-release-\(remoteShell)")
+        let beforeDispatchCompleted = home.appendingPathComponent("before-dispatch-completed-\(remoteShell)")
+        try? FileManager.default.removeItem(at: beforeDispatchStarted)
+        try? FileManager.default.removeItem(at: beforeDispatchRelease)
+        try? FileManager.default.removeItem(at: beforeDispatchCompleted)
+        pane.send(source: pane, data: Array("""
+        /bin/sh -c '/usr/bin/touch "\(beforeDispatchStarted.path)"; while [ ! -e "\(beforeDispatchRelease.path)" ]; do /bin/sleep 0.02; done; /usr/bin/touch "\(beforeDispatchCompleted.path)"'
+        \r
+        """.utf8)[...])
+        let beforeDispatchStartDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while !FileManager.default.fileExists(atPath: beforeDispatchStarted.path),
+              ContinuousClock.now < beforeDispatchStartDeadline {
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        try #require(FileManager.default.fileExists(atPath: beforeDispatchStarted.path))
+        let cancelledBeforeDispatch = Task {
+            await driver.run("printf 'SSH_AI_DISPATCH_SHOULD_NOT_RUN\\n'", in: pane, proofSource: plan.proofSource)
+        }
+        try await Task.sleep(for: .milliseconds(150))
+        cancelledBeforeDispatch.cancel()
+        _ = await cancelledBeforeDispatch.value
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(!FileManager.default.fileExists(atPath: beforeDispatchCompleted.path))
+        try Data().write(to: beforeDispatchRelease)
+        let beforeDispatchDeadline = ContinuousClock.now.advanced(by: .seconds(4))
+        var beforeDispatchCommandRan = false
+        while ContinuousClock.now < beforeDispatchDeadline, !beforeDispatchCommandRan {
+            try await Task.sleep(for: .milliseconds(40))
+            beforeDispatchCommandRan = FileManager.default.fileExists(atPath: beforeDispatchCompleted.path)
+        }
+        #expect(beforeDispatchCommandRan)
+        let cancelStarted = home.appendingPathComponent("cancel-started-\(remoteShell)")
+        try? FileManager.default.removeItem(at: cancelStarted)
+        let cancelledRun = Task {
+            await driver.run(
+                "/usr/bin/touch '\(cancelStarted.path)'; while :; do /bin/sleep 1; done",
+                in: pane,
+                proofSource: plan.proofSource
+            )
+        }
+        let cancelDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while !FileManager.default.fileExists(atPath: cancelStarted.path), ContinuousClock.now < cancelDeadline {
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        try #require(FileManager.default.fileExists(atPath: cancelStarted.path))
+        cancelledRun.cancel()
+        let manualMarker = "SSH_MANUAL_AFTER_STOP_\(remoteShell.uppercased())"
+        pane.send(source: pane, data: Array("printf '\(manualMarker)\\n'\r".utf8)[...])
+        let manualDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+        var manualCommandRan = false
+        while ContinuousClock.now < manualDeadline, !manualCommandRan {
+            try await Task.sleep(for: .milliseconds(40))
+            manualCommandRan = (0..<TerminalRunReading.lineCount(terminal)).contains { row in
+                TerminalRunReading.lineText(terminal, row: row)?.contains(manualMarker) == true
+            }
+        }
+        _ = await cancelledRun.value
+        let cancelDiagnostic = (0..<TerminalRunReading.lineCount(terminal))
+            .compactMap { TerminalRunReading.lineText(terminal, row: $0) }
+            .suffix(20)
+            .joined(separator: "\n")
+        #expect(manualCommandRan,
+            "shell=\(remoteShell) title=\(pane.proofBox.currentTitle)\n\(cancelDiagnostic)")
         let multiline = await driver.run("cd '\(home.path)'\ncat <<'END'\nit's ready\nEND\npwd", in: pane,
             proofSource: plan.proofSource, timeout: 10)
         #expect(multiline.exitStatus == 0)

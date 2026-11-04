@@ -46,11 +46,24 @@ private enum SidebarItem: Hashable {
     case smb(UUID)
 }
 
-private struct SSHHostSidebarEntry: Identifiable {
+struct SSHHostSidebarEntry: Identifiable {
     let host: SSHHost
     let session: TerminalSession?
 
     var id: UUID { host.id }
+}
+
+enum SSHHostSidebarPolicy {
+    static func entries(hosts: [SSHHost], sessions: [TerminalSession]) -> [SSHHostSidebarEntry] {
+        hosts.map { host in
+            SSHHostSidebarEntry(
+                host: host,
+                session: TerminalSessionPolicy.existingSession(for: host, in: sessions)
+            )
+        }.sorted {
+            $0.host.displayName.localizedStandardCompare($1.host.displayName) == .orderedAscending
+        }
+    }
 }
 
 /// Sidebar and tab rules kept separate from SwiftUI so they can be verified
@@ -63,6 +76,23 @@ enum TerminalSessionPolicy {
 
     static func existingSession(for host: SSHHost, in sessions: [TerminalSession]) -> TerminalSession? {
         sessions.first { $0.host?.id == host.id }
+    }
+
+    static func connectionConfigurationChanged(from current: SSHHost, to updated: SSHHost) -> Bool {
+        current.address != updated.address
+            || current.username != updated.username
+            || current.port != updated.port
+            || current.authentication != updated.authentication
+            || current.password != updated.password
+            || current.privateKeyPath != updated.privateKeyPath
+            || current.remoteShell != updated.remoteShell
+    }
+
+    static func applyingDisplayMetadata(from updated: SSHHost, to current: SSHHost) -> SSHHost {
+        var result = current
+        result.name = updated.name
+        result.group = updated.group
+        return result
     }
 }
 
@@ -634,7 +664,8 @@ struct TerminalWorkspace: View {
         let markedProblem = TerminalRunReading.readinessProblem(
             terminal: terminal, title: live.view.proofBox.currentTitle,
             generation: live.view.connectionGeneration,
-            userTypedSincePrompt: live.view.proofBox.hasUserTypedSincePrompt
+            userTypedSincePrompt: live.view.proofBox.hasUserTypedSincePrompt,
+            commandSubmittedSincePrompt: live.view.proofBox.hasSubmittedCommandSincePrompt
         )
         if markedProblem != nil, let problem = TerminalRunReading.unmarkedShellReadinessProblem(
             terminal: terminal, title: live.view.proofBox.currentTitle,
@@ -809,16 +840,7 @@ struct TerminalWorkspace: View {
     }
 
     private var sshSidebarEntries: [SSHHostSidebarEntry] {
-        var entries = hosts.map { host in
-            SSHHostSidebarEntry(host: host, session: TerminalSessionPolicy.existingSession(for: host, in: sessions))
-        }
-        for session in sessions {
-            guard let host = session.host, !hosts.contains(where: { $0.id == host.id }) else { continue }
-            entries.append(SSHHostSidebarEntry(host: host, session: session))
-        }
-        return entries.sorted {
-            $0.host.displayName.localizedStandardCompare($1.host.displayName) == .orderedAscending
-        }
+        SSHHostSidebarPolicy.entries(hosts: hosts, sessions: sessions)
     }
 
     private func sessionRow(_ session: TerminalSession) -> some View {
@@ -943,6 +965,7 @@ struct TerminalWorkspace: View {
             for: session,
             workingDirectory: ((session.startingDirectory ?? preferences.workingDirectory) as NSString).expandingTildeInPath
         )
+        model.updateTarget(session.host)
         if preferences.keepRecentTurns != model.contextConfiguration.keepRecentTurns
             || preferences.triggerRatio != model.contextConfiguration.triggerRatio
             || !model.contextConfiguration.autoCompact {
@@ -1138,8 +1161,13 @@ struct TerminalWorkspace: View {
                                 // Creation happens during a SwiftUI update; publish on
                                 // the next turn and reject callbacks from old panes.
                                 DispatchQueue.main.async {
-                                    guard sessions.contains(where: { $0.id == session.id }),
-                                          sessionRestartTokens[session.id, default: 0] == restartToken else { return }
+                                    let accepted = sessions.contains(where: { $0.id == session.id })
+                                        && sessionRestartTokens[session.id, default: 0] == restartToken
+                                    #if DEBUG
+                                    terminalViews.liveTerminal(for: session.id)?.view.recordSSHDiagnostic(
+                                        "workspace state=\(state.label) accepted=\(accepted) restartToken=\(restartToken)")
+                                    #endif
+                                    guard accepted else { return }
                                     sshConnectionStates[session.id] = state
                                 }
                             }
@@ -1296,11 +1324,13 @@ struct TerminalWorkspace: View {
         try SSHHostStore.save(updatedHosts)
         hosts = updatedHosts
         if !host.savePassword { SSHHostStore.deletePasswordFile(for: host.id) }
+        updateSessionDisplayMetadata(for: host)
         if connect { addSession(host: host) }
     }
 
     private func addSession(host: SSHHost?, workingDirectory: String? = nil) {
         if let host, let existing = TerminalSessionPolicy.existingSession(for: host, in: sessions) {
+            restartSessionIfConnectionChanged(existing, for: host)
             selectedSessionID = existing.id
             page = .terminal
             sidebarSelection = .session(existing.id)
@@ -1316,13 +1346,33 @@ struct TerminalWorkspace: View {
     /// Clicking a saved host connects once and afterwards only switches to the
     /// existing terminal tab; a host never gets duplicate live sessions.
     private func openHost(_ host: SSHHost) {
-        if let session = TerminalSessionPolicy.existingSession(for: host, in: sessions) {
-            selectedSessionID = session.id
-            page = .terminal
-            sidebarSelection = .session(session.id)
-        } else {
-            addSession(host: host)
-        }
+        addSession(host: host)
+    }
+
+    private func restartSessionIfConnectionChanged(_ session: TerminalSession, for host: SSHHost) {
+        guard let currentHost = session.host,
+              TerminalSessionPolicy.connectionConfigurationChanged(from: currentHost, to: host),
+              let index = sessions.firstIndex(where: { $0.id == session.id }) else { return }
+        let startingDirectory = sessions[index].startingDirectory
+        sessions[index] = TerminalSession(id: session.id, host: host, startingDirectory: startingDirectory)
+        exitedSessionIDs.remove(session.id)
+        sshConnectionStates[session.id] = .connecting
+        sessionRestartTokens[session.id, default: 0] += 1
+        persistSessions()
+    }
+
+    private func updateSessionDisplayMetadata(for host: SSHHost) {
+        guard let index = sessions.firstIndex(where: { $0.host?.id == host.id }),
+              let currentHost = sessions[index].host,
+              currentHost != host else { return }
+        let updatedHost = TerminalSessionPolicy.applyingDisplayMetadata(from: host, to: currentHost)
+        guard updatedHost != currentHost else { return }
+        sessions[index] = TerminalSession(
+            id: sessions[index].id,
+            host: updatedHost,
+            startingDirectory: sessions[index].startingDirectory
+        )
+        persistSessions()
     }
 
     private func openLocalTerminal() {

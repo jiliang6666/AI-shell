@@ -94,4 +94,21 @@ struct SSHConnectionProgressTests {
         #expect(pane.process?.running != true)
         pane.stopForRemoval()
     }
+
+    @Test @MainActor func aiInterruptDistinguishesCancellationFromTimeoutRetry() {
+        let pane = TerminalPaneView(frame: .zero)
+        pane.prepareAIAutomation()
+
+        #expect(!pane.interruptAIAutomation())
+
+        pane.markAIAutomationDispatched()
+        #expect(pane.interruptAIAutomation())
+        #expect(!pane.interruptAIAutomation())
+        #expect(pane.retryInterruptAIAutomation())
+
+        pane.finishAIAutomation()
+        #expect(!pane.interruptAIAutomation())
+        #expect(!pane.retryInterruptAIAutomation())
+        pane.stopForRemoval()
+    }
 }

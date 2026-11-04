@@ -469,7 +469,7 @@ final class TerminalAIModel: ObservableObject {
     private(set) var terminalSessionID: UUID?
     var terminalGeneration: UUID?
 
-    let target: SSHHost?
+    private(set) var target: SSHHost?
     private var defaultWorkingDirectory: String?
     private var sessionLoadTask: Task<Void, Never>?
     @Published private(set) var conversationID: UUID
@@ -788,6 +788,11 @@ final class TerminalAIModel: ObservableObject {
 
     func updateWorkingDirectory(_ value: String) {
         if target == nil { defaultWorkingDirectory = value }
+    }
+
+    func updateTarget(_ host: SSHHost?) {
+        guard target?.id == host?.id else { return }
+        target = host
     }
 
     /// Re-reads whether the bound session has a live terminal that can prove
@@ -3036,6 +3041,12 @@ enum LocalShellCommandRunner {
                 let pipe = Pipe()
                 let sudoInput = sudoPassword == nil ? nil : Pipe()
                 let sudoPrompt = sudoPassword == nil ? nil : "SWIFTTERMINAL_SUDO_\(UUID().uuidString):"
+                var runtimeCredentialFile: URL?
+                defer {
+                    if let runtimeCredentialFile {
+                        SSHHostStore.deleteRuntimePasswordFile(runtimeCredentialFile)
+                    }
+                }
                 var environment = ["TERM=xterm-256color", "LANG=en_US.UTF-8"]
                 if let host {
                     let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -3074,8 +3085,12 @@ enum LocalShellCommandRunner {
                         environment.append("SSH_AUTH_SOCK=\(socket)")
                     }
                     if host.savePassword, !host.password.isEmpty,
-                       let askpass = try? SSHHostStore.askpassConfiguration(for: host) {
-                        environment += askpass
+                       let askpass = try? SSHHostStore.runtimeAskpassConfiguration(
+                           for: host,
+                           generation: UUID()
+                       ) {
+                        environment += askpass.environment
+                        runtimeCredentialFile = askpass.credentialFile
                     }
                 } else {
                     process.executableURL = URL(fileURLWithPath: "/bin/zsh")

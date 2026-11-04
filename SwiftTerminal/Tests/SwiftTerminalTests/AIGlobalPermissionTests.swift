@@ -2,6 +2,40 @@ import Foundation
 import Testing
 @testable import SwiftTerminal
 
+@Test("Cached SSH target metadata refreshes only for the same host identity")
+@MainActor
+func sshModelRefreshesDisplayMetadataWithoutChangingIdentity() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("AITargetMetadata-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let profileStore = ModelProfileStore(directory: root.appendingPathComponent("profiles"))
+    let coordinator = AISessionCoordinator(
+        store: AISessionStore(directory: root.appendingPathComponent("sessions")),
+        legacyArchiveURL: root.appendingPathComponent("legacy.json"),
+        resumeExecutionHistory: {}
+    )
+    let host = SSHHost(name: "Old name", address: "192.0.2.1", username: "fixture")
+    let model = TerminalAIModel(
+        target: host,
+        terminalSessionID: UUID(),
+        modelProfileStore: profileStore,
+        sessionCoordinator: coordinator,
+        httpTransport: OpenPermissionTestTransport(),
+        archiveLoader: { [] },
+        archiveWriter: { _ in }
+    )
+    defer { Task { await model.prepareForTerminalDeletion() } }
+    var renamed = host
+    renamed.name = "New name"
+    renamed.group = "Production"
+
+    model.updateTarget(renamed)
+    #expect(model.target == renamed)
+
+    let other = SSHHost(name: "Other", address: "192.0.2.2", username: "fixture")
+    model.updateTarget(other)
+    #expect(model.target == renamed)
+}
+
 @Test("Local and SSH choices synchronize independently and survive history deletion and reopening")
 @MainActor
 func globalAIPermissionsSurviveDeletion() async throws {

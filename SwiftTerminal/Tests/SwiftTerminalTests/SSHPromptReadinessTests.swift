@@ -372,6 +372,44 @@ func sudoChildShellFallbackMode() async throws {
     }
 }
 
+@Test("A manually entered unmarked child shell still supports AI fallback", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
+@MainActor
+func manuallyEnteredUnmarkedChildShellAllowsAIFallback() async throws {
+    let home = try makeHome()
+    defer { try? FileManager.default.removeItem(at: home) }
+    let pane = makeSSHFixturePane(home: home, shell: "zsh")
+    defer { if pane.process?.running == true { pane.terminate() } }
+    let problem = await waitUntilReady(pane, generation: pane.connectionGeneration)
+    #expect(problem == nil)
+    guard problem == nil else { return }
+
+    pane.send(source: pane, data: Array("exec /bin/bash --noprofile --norc -i\r".utf8)[...])
+    let terminal = try #require(pane.terminal)
+    let readinessDeadline = ContinuousClock.now.advanced(by: .seconds(5))
+    var childReady = false
+    while ContinuousClock.now < readinessDeadline, !childReady {
+        try await Task.sleep(for: .milliseconds(50))
+        childReady = TerminalRunReading.unmarkedShellReadinessProblem(
+            terminal: terminal,
+            title: pane.proofBox.currentTitle,
+            userTypedSincePrompt: pane.proofBox.hasUserTypedSincePrompt
+        ) == nil
+    }
+    try #require(childReady)
+    #expect(pane.proofBox.hasSubmittedCommandSincePrompt)
+
+    let result = await TerminalCommandDriver().run(
+        "printf 'MANUAL_CHILD_AI_OK'",
+        in: pane,
+        proofSource: .title(generation: pane.connectionGeneration),
+        timeout: 8
+    )
+    #expect(!result.unavailable, "fallback refused: \(result.unavailableReason ?? "-")")
+    #expect(!result.timedOut)
+    #expect(result.returnedToPrompt)
+    #expect(result.output.contains("MANUAL_CHILD_AI_OK"))
+}
+
 @Test("A terminal command that never finishes is bounded and interrupted", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
 @MainActor
 func neverFinishingCommandIsBounded() async throws {

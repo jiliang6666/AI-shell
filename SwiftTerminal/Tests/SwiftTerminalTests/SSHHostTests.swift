@@ -77,4 +77,48 @@ final class SSHHostTests: XCTestCase {
         XCTAssertEqual(grouped[2].hosts.map(\.name), ["c", "d"])
         XCTAssertEqual(SSHHostGrouping.knownGroups(hosts), ["prod", "test"])
     }
+
+    func testRuntimeAskpassCredentialIsIndependentFromSavedCredential() throws {
+        let host = SSHHost(
+            name: "runtime",
+            address: "127.0.0.1",
+            username: "fixture",
+            password: "fixture-password",
+            savePassword: true
+        )
+        let askpass = try SSHHostStore.runtimeAskpassConfiguration(for: host, generation: UUID())
+        defer { SSHHostStore.deleteRuntimePasswordFile(askpass.credentialFile) }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: askpass.credentialFile.path))
+        SSHHostStore.deletePasswordFile(for: host.id)
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: askpass.credentialFile.path),
+            "Deleting saved credentials must not remove a running connection's runtime credential"
+        )
+        XCTAssertTrue(askpass.environment.contains {
+            $0 == "SWIFTTERMINAL_SSH_PASSWORD_FILE=\(askpass.credentialFile.path)"
+        })
+    }
+
+    func testStaleRuntimeCredentialFromDeadProcessIsRemoved() throws {
+        let host = SSHHost(
+            name: "orphan",
+            address: "127.0.0.1",
+            username: "fixture",
+            password: "fixture-password",
+            savePassword: true
+        )
+        let orphan = try SSHHostStore.runtimeAskpassConfiguration(
+            for: host,
+            generation: UUID(),
+            processIdentifier: 999_999
+        )
+        defer { SSHHostStore.deleteRuntimePasswordFile(orphan.credentialFile) }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: orphan.credentialFile.path))
+
+        SSHHostStore.cleanupStaleRuntimePasswordFiles()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphan.credentialFile.path))
+    }
 }

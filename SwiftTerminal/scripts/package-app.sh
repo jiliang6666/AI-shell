@@ -21,9 +21,9 @@ RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 UPDATE_REPOSITORY="${ZHANQIAO_UPDATE_REPOSITORY:-jiliang6666/AI-shell}"
 UPDATE_PUBLIC_KEY="${ZHANQIAO_UPDATE_PUBLIC_KEY:-Fd2DQDZ/nrE3xmzNRzxaITrFvy4L4cfnFf5Y/pCTY44=}"
-APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.8}"
-APP_BUILD="${ZHANQIAO_APP_BUILD:-108}"
-UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-108}"
+APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.9}"
+APP_BUILD="${ZHANQIAO_APP_BUILD:-109}"
+UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-109}"
 UPDATE_FEED_URL=""
 case "$APP_VERSION" in ''|*[!0-9.]*) echo "Invalid ZHANQIAO_APP_VERSION." >&2; exit 2 ;; esac
 case "$APP_BUILD" in ''|*[!0-9]*) echo "Invalid ZHANQIAO_APP_BUILD." >&2; exit 2 ;; esac
@@ -67,6 +67,11 @@ if ! otool -l "$MACOS/SwiftTerminal" | grep -Fq 'path @executable_path/../Framew
 fi
 # Keep the distributable lean; Debug builds and the local SwiftPM build remain unstripped.
 strip -S -x "$MACOS/SwiftTerminal"
+# SwiftPM preserves the build checkout's group-write/execute bits. Sparkle's
+# update validator requires regular files to be 0644 and executables 0755
+# before it will sign a release or create a delta update.
+find "$CONTENTS" -type f -perm -001 -exec chmod 755 {} +
+find "$CONTENTS" -type f ! -perm -001 -exec chmod 644 {} +
 swift scripts/generate-icon.swift "$ROOT/build/AppIcon.png" "$RESOURCES/AppIcon.icns"
 cat > "$CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

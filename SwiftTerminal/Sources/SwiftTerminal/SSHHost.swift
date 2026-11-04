@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 struct SSHHost: Codable, Identifiable, Equatable, Sendable {
@@ -169,6 +170,16 @@ enum SSHHostStore {
         directory.appendingPathComponent("ssh-\(hostID.uuidString).credential")
     }
 
+    private static func runtimeCredentialFile(
+        for hostID: UUID,
+        generation: UUID,
+        processIdentifier: Int32
+    ) -> URL {
+        directory.appendingPathComponent(
+            "ssh-\(hostID.uuidString)-\(generation.uuidString)-\(processIdentifier).runtime.credential"
+        )
+    }
+
     static func ensureAskpassHelper() throws -> URL {
         try FileManager.default.createDirectory(
             at: directory,
@@ -182,17 +193,59 @@ enum SSHHostStore {
         return helper
     }
 
-    static func askpassConfiguration(for host: SSHHost) throws -> [String] {
+    struct AskpassConfiguration: Sendable {
+        let environment: [String]
+        let credentialFile: URL
+    }
+
+    static func runtimeAskpassConfiguration(
+        for host: SSHHost,
+        generation: UUID,
+        processIdentifier: Int32 = ProcessInfo.processInfo.processIdentifier
+    ) throws -> AskpassConfiguration {
         let helper = try ensureAskpassHelper()
-        let credential = credentialFile(for: host.id)
-        try Data(host.password.utf8).write(to: credential, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: credential.path)
-        return [
-            "SSH_ASKPASS=\(helper.path)",
-            "SSH_ASKPASS_REQUIRE=force",
-            "DISPLAY=SwiftTerminal",
-            "SWIFTTERMINAL_SSH_PASSWORD_FILE=\(credential.path)"
-        ]
+        let credential = runtimeCredentialFile(
+            for: host.id,
+            generation: generation,
+            processIdentifier: processIdentifier
+        )
+        do {
+            try Data(host.password.utf8).write(to: credential, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: credential.path)
+        } catch {
+            try? FileManager.default.removeItem(at: credential)
+            throw error
+        }
+        return AskpassConfiguration(
+            environment: [
+                "SSH_ASKPASS=\(helper.path)",
+                "SSH_ASKPASS_REQUIRE=force",
+                "DISPLAY=SwiftTerminal",
+                "SWIFTTERMINAL_SSH_PASSWORD_FILE=\(credential.path)"
+            ],
+            credentialFile: credential
+        )
+    }
+
+    static func deleteRuntimePasswordFile(_ credential: URL) {
+        try? FileManager.default.removeItem(at: credential)
+    }
+
+    static func cleanupStaleRuntimePasswordFiles() {
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil
+        ) else { return }
+        let currentProcess = ProcessInfo.processInfo.processIdentifier
+        for file in files where file.lastPathComponent.hasSuffix(".runtime.credential") {
+            let stem = String(file.lastPathComponent.dropLast(".runtime.credential".count))
+            guard let separator = stem.lastIndex(of: "-"),
+                  let processID = pid_t(stem[stem.index(after: separator)...]),
+                  processID != currentProcess else { continue }
+            if kill(processID, 0) == -1, errno == ESRCH {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
     }
 
     static func deletePasswordFile(for hostID: UUID) {

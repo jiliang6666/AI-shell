@@ -14,26 +14,68 @@ final class TerminalPaneView: LocalProcessTerminalView {
     private var sshProgress: SSHConnectionProgress?
     private var sshStateChanged: ((SSHConnectionState) -> Void)?
     private var sshPreparation: Task<Void, Never>?
+    private var sshRuntimeCredentialFile: URL?
     private var activationObserver: NSObjectProtocol?
+    private var aiAutomationDispatched = false
+    private var aiCancellationInterruptSent = false
+    #if DEBUG
+    private var sshDiagnosticChunks = 0
+    private var sshDiagnosticEvents: FileHandle?
+    #endif
 
     func prepareSSH(_ host: SSHHost, environment: [String], onState: ((SSHConnectionState) -> Void)?, extraOptions: [String] = []) {
+        cleanupSSHRuntimeCredential()
         sshProgress = SSHConnectionProgress(generation: connectionGeneration, expectsReadyMarker: ["bash", "zsh"].contains(host.remoteShell))
         sshStateChanged = onState
         onState?(.connecting)
         let generation = connectionGeneration
+        var options = extraOptions
+        #if DEBUG
+        let logDirectory = URL(fileURLWithPath: "/private/tmp/SwiftTerminal-SSHDiagnostics", isDirectory: true)
+        let logFile = logDirectory.appendingPathComponent("\(ProcessInfo.processInfo.processIdentifier)-\(generation.uuidString).log")
+        do {
+            try FileManager.default.createDirectory(at: logDirectory, withIntermediateDirectories: true,
+                                                    attributes: [.posixPermissions: 0o700])
+            guard FileManager.default.createFile(atPath: logFile.path, contents: nil,
+                                                  attributes: [.posixPermissions: 0o600]) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            let eventsFile = logFile.deletingPathExtension().appendingPathExtension("events.log")
+            guard FileManager.default.createFile(atPath: eventsFile.path, contents: nil,
+                                                  attributes: [.posixPermissions: 0o600]) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            sshDiagnosticEvents = try FileHandle(forWritingTo: eventsFile)
+            options += ["-vvv", "-E", logFile.path]
+            recordSSHDiagnostic("prepared sshLog=\(logFile.lastPathComponent)")
+        } catch {
+            NSLog("SSH diagnostics unavailable: %@", String(describing: error))
+        }
+        #endif
+        let launchOptions = options
         sshPreparation = Task { [weak self] in
             // Give the navigation and connection indicator a chance to render.
             await Task.yield()
             guard !Task.isCancelled else { return }
             let plan = await Task.detached(priority: .userInitiated) {
-                SSHRemoteLaunch.plan(for: host, generation: generation, extraOptions: extraOptions)
+                SSHRemoteLaunch.plan(for: host, generation: generation, extraOptions: launchOptions)
             }.value
-            guard !Task.isCancelled, let self, self.sshProgress?.state.canRetry == false else { return }
+            guard !Task.isCancelled, let self, self.sshProgress?.state.canRetry == false else {
+                if let credential = plan.runtimeCredentialFile {
+                    SSHHostStore.deleteRuntimePasswordFile(credential)
+                }
+                return
+            }
+            self.sshRuntimeCredentialFile = plan.runtimeCredentialFile
             self.startWhenSized { [weak self] in
                 guard let self else { return }
                 self.startProcess(executable: "/usr/bin/ssh", args: plan.arguments,
                                   environment: environment + plan.environment, execName: "ssh")
+                #if DEBUG
+                self.recordSSHDiagnostic("launched pid=\(self.process?.shellPid ?? 0) fd=\(self.process?.childfd ?? -1) running=\(self.process?.running == true)")
+                #endif
                 if self.process?.running != true {
+                    self.cleanupSSHRuntimeCredential()
                     self.sshProgress?.finish()
                     self.publishSSHState()
                 }
@@ -47,6 +89,7 @@ final class TerminalPaneView: LocalProcessTerminalView {
         sshPreparation?.cancel()
         sshPreparation = nil
         pendingLaunch = nil
+        cleanupSSHRuntimeCredential()
         sshProgress?.cancel()
         publishSSHState()
         if process?.running == true { terminate() }
@@ -56,18 +99,39 @@ final class TerminalPaneView: LocalProcessTerminalView {
         sshPreparation?.cancel()
         sshPreparation = nil
         pendingLaunch = nil
+        cleanupSSHRuntimeCredential()
         sshStateChanged = nil
         if process?.running == true { terminate() }
     }
 
+    private func cleanupSSHRuntimeCredential() {
+        guard let credential = sshRuntimeCredentialFile else { return }
+        sshRuntimeCredentialFile = nil
+        SSHHostStore.deleteRuntimePasswordFile(credential)
+    }
+
     private func publishSSHState() {
+        #if DEBUG
+        if let state = sshProgress?.state { recordSSHDiagnostic("pane state=\(state.label)") }
+        #endif
         if let state = sshProgress?.state { sshStateChanged?(state) }
     }
 
+    /// Debug-only startup metadata; never records terminal contents or credentials.
+    func recordSSHDiagnostic(_ event: String) {
+        #if DEBUG
+        guard let data = "\(Date().timeIntervalSince1970) \(event)\n".data(using: .utf8) else { return }
+        try? sshDiagnosticEvents?.write(contentsOf: data)
+        #endif
+    }
+
     func receivedTitle(_ title: String) {
+        #if DEBUG
+        if sshProgress != nil { recordSSHDiagnostic("title ready=\(title == "__SWIFTTERMINAL_READY=\(connectionGeneration.uuidString.lowercased())")") }
+        #endif
         proofBox.update(title: title)
         if title == "__SWIFTTERMINAL_READY=\(connectionGeneration.uuidString.lowercased())" {
-            proofBox.resetUserTyped()
+            proofBox.resetPromptState()
             // A fresh prompt is the right moment to undo any OSC 10/11 color
             // override the shell left behind, so the configured palette wins.
             TerminalAppearanceApplier.reassertColors(
@@ -79,6 +143,12 @@ final class TerminalPaneView: LocalProcessTerminalView {
     }
 
     override func dataReceived(slice: ArraySlice<UInt8>) {
+        #if DEBUG
+        if sshProgress != nil, sshDiagnosticChunks < 12 {
+            sshDiagnosticChunks += 1
+            recordSSHDiagnostic("PTY chunk=\(sshDiagnosticChunks) bytes=\(slice.count)")
+        }
+        #endif
         let previous = sshProgress?.state
         sshProgress?.receive(String(decoding: slice, as: UTF8.self))
         if previous != sshProgress?.state { publishSSHState() }
@@ -126,6 +196,37 @@ final class TerminalPaneView: LocalProcessTerminalView {
         terminal.sendUserInput(data)
     }
 
+    func prepareAIAutomation() {
+        aiAutomationDispatched = false
+        aiCancellationInterruptSent = false
+    }
+
+    func markAIAutomationDispatched() {
+        aiAutomationDispatched = true
+        aiCancellationInterruptSent = false
+    }
+
+    func finishAIAutomation() {
+        aiAutomationDispatched = false
+        aiCancellationInterruptSent = false
+    }
+
+    @discardableResult
+    func interruptAIAutomation() -> Bool {
+        guard aiAutomationDispatched, !aiCancellationInterruptSent else { return false }
+        aiCancellationInterruptSent = true
+        sendAIDispatch([TerminalCommandDriver.interruptByte][...])
+        return true
+    }
+
+    @discardableResult
+    func retryInterruptAIAutomation() -> Bool {
+        guard aiAutomationDispatched else { return false }
+        aiCancellationInterruptSent = true
+        sendAIDispatch([TerminalCommandDriver.interruptByte][...])
+        return true
+    }
+
     /// Terminal-initiated traffic arrives through the TerminalDelegate hop.
     /// Forward it, but do not count it as typing.
     override func send(source: Terminal, data: ArraySlice<UInt8>) {
@@ -153,8 +254,12 @@ final class TerminalPaneView: LocalProcessTerminalView {
     }
 
     override func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        #if DEBUG
+        if sshProgress != nil { recordSSHDiagnostic("exit=\(exitCode.map(String.init) ?? "nil")") }
+        #endif
         sshProgress?.finish()
         publishSSHState()
+        cleanupSSHRuntimeCredential()
         super.processTerminated(source, exitCode: exitCode)
     }
 
@@ -226,6 +331,7 @@ final class TerminalProofBox: @unchecked Sendable {
     private var startedEvents: [(sequence: Int, nonce: String)] = []
     private var startSequence = 0
     private var userTypedSincePrompt = false
+    private var commandSubmittedSincePrompt = false
 
     func update(title: String) {
         lock.lock()
@@ -281,15 +387,22 @@ final class TerminalProofBox: @unchecked Sendable {
         return userTypedSincePrompt
     }
 
+    var hasSubmittedCommandSincePrompt: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return commandSubmittedSincePrompt
+    }
+
     func markUserTyped() {
         lock.lock()
         userTypedSincePrompt = true
         lock.unlock()
     }
 
-    func resetUserTyped() {
+    func resetPromptState() {
         lock.lock()
         userTypedSincePrompt = false
+        commandSubmittedSincePrompt = false
         lock.unlock()
     }
 
@@ -299,6 +412,7 @@ final class TerminalProofBox: @unchecked Sendable {
     func markCommandSubmitted(generation: UUID) {
         lock.lock()
         userTypedSincePrompt = false
+        commandSubmittedSincePrompt = true
         let ready = "__SWIFTTERMINAL_READY=\(generation.uuidString.lowercased())"
         if title == ready {
             title = "__SWIFTTERMINAL_BUSY=\(generation.uuidString.lowercased())"
@@ -598,17 +712,20 @@ enum SSHRemoteLaunch {
         let arguments: [String]
         let environment: [String]
         let proofSource: TerminalProofSource
+        let runtimeCredentialFile: URL?
     }
 
     static func plan(for host: SSHHost, generation: UUID, extraOptions: [String] = []) -> Plan {
         var arguments = ["-tt", "-p", String(host.port), "-o", "ConnectTimeout=\(SSHConnectionPolicy.connectTimeout(address: host.address))", "-o", "ConnectionAttempts=1"]
         arguments += extraOptions
         var environment: [String] = []
+        var runtimeCredentialFile: URL?
         if host.authentication == .password {
             arguments += ["-o", "PreferredAuthentications=password,keyboard-interactive", "-o", "PubkeyAuthentication=no"]
             if host.savePassword, !host.password.isEmpty,
-               let askpass = try? SSHHostStore.askpassConfiguration(for: host) {
-                environment.append(contentsOf: askpass)
+               let askpass = try? SSHHostStore.runtimeAskpassConfiguration(for: host, generation: generation) {
+                environment.append(contentsOf: askpass.environment)
+                runtimeCredentialFile = askpass.credentialFile
             }
         } else if host.authentication == .privateKey {
             arguments += ["-i", (host.privateKeyPath as NSString).expandingTildeInPath]
@@ -619,13 +736,13 @@ enum SSHRemoteLaunch {
         case "bash", "zsh":
             arguments.append(remoteCommand(shell: host.remoteShell, generation: generation))
             return Plan(arguments: arguments, environment: environment,
-                proofSource: .title(generation: generation))
+                proofSource: .title(generation: generation), runtimeCredentialFile: runtimeCredentialFile)
         default:
             if !host.remoteShell.isEmpty {
                 arguments.append("exec \(host.remoteShell)")
             }
             return Plan(arguments: arguments, environment: environment,
-                proofSource: .unavailable(generation: generation))
+                proofSource: .unavailable(generation: generation), runtimeCredentialFile: runtimeCredentialFile)
         }
     }
 

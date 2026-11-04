@@ -11,6 +11,7 @@ struct SwiftTerminalApp: App {
                 .task { _ = UpdateController.shared }
                 .task { await LocalNetworkAccess.requestAtLaunch() }
                 .task { await AISessionCoordinator.shared.bootstrap() }
+                .task { SSHHostStore.cleanupStaleRuntimePasswordFiles() }
         }
         .defaultSize(width: 1280, height: 820)
         .windowStyle(.titleBar)

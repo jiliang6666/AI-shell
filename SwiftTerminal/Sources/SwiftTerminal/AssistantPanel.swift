@@ -293,7 +293,7 @@ struct AssistantPanel: View {
             .foregroundStyle(.secondary)
 
             if targetHost != nil {
-                Label("首次连接请先在终端确认此主机的 SSH 指纹", systemImage: "exclamationmark.shield")
+                Label("若终端提示主机指纹，请核对后再确认", systemImage: "exclamationmark.shield")
                     .font(.system(size: 10))
                     .foregroundStyle(.orange)
             }
@@ -641,6 +641,7 @@ struct AIModelPicker: View {
     @Environment(\.dismiss) private var dismiss
     @State private var search = ""
     @State private var selecting = false
+    @FocusState private var searchFocused: Bool
 
     private var groups: [AIModelMenuGroup] { AIModelMenuOptions.groups(profiles: model.profiles, query: search) }
 
@@ -651,10 +652,12 @@ struct AIModelPicker: View {
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain).accessibilityLabel("关闭模型选择")
+                    .keyboardShortcut(.cancelAction)
             }
             .padding(.bottom, 10)
             TextField("搜索模型…", text: $search)
                 .textFieldStyle(.roundedBorder).accessibilityLabel("搜索模型").padding(.bottom, 10)
+                .focused($searchFocused)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     if groups.isEmpty {
@@ -691,6 +694,10 @@ struct AIModelPicker: View {
             if let error = model.errorMessage { Text(error).font(.caption).foregroundStyle(.red).padding(.top, 8) }
         }
         .padding(14).frame(width: 310, height: 340)
+        .task {
+            await Task.yield()
+            searchFocused = true
+        }
     }
 }
 

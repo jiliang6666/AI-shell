@@ -305,7 +305,15 @@ struct TerminalWorkspace: View {
     var body: some View {
         folderOpenRouting
             .focusedSceneValue(\.terminalActionsAvailable, !isSMBTarget && page == .terminal)
-            .background(WorkspaceWindowReader { workspaceWindowNumber = $0.windowNumber })
+            .background(WorkspaceWindowReader { window in
+                workspaceWindowNumber = window.windowNumber
+                if page == .terminal, !isSMBTarget,
+                   let id = selectedSessionID,
+                   let live = terminalViews.liveTerminal(for: id) {
+                    window.initialFirstResponder = live.view
+                    window.makeFirstResponder(live.view)
+                }
+            })
     }
 
     private var folderOpenRouting: some View {

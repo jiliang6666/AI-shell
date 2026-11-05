@@ -108,6 +108,14 @@ struct AICommandOutputCard: View {
                     .font(.system(size: fontSize, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
+                if let duration = presentation.durationText {
+                    Text("\(presentation.durationLabel) \(duration)")
+                        .font(.system(size: max(12, fontSize - 1)))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .fixedSize()
+                        .accessibilityIdentifier("ai.command.duration")
+                }
                 Text(presentation.status.title)
                     .font(.system(size: max(12, fontSize - 1), weight: .medium))
                     .foregroundStyle(statusColor)
@@ -120,6 +128,11 @@ struct AICommandOutputCard: View {
             DisclosureGroup("命令与运行日志", isExpanded: $expanded) {
                 VStack(alignment: .leading, spacing: 8) {
                     if let command = presentation.command { AICommandPreview(command: command, fontSize: fontSize) }
+                    if presentation.showsRunDuration, let runDuration = presentation.runDurationText {
+                        Text("命令运行耗时：\(runDuration)")
+                            .font(.system(size: max(12, fontSize - 1)))
+                            .foregroundStyle(.secondary)
+                    }
                     ScrollView([.horizontal, .vertical]) {
                         Text(presentation.output.isEmpty ? "没有输出。" : presentation.output)
                             .font(.system(size: max(12, fontSize - 1), design: .monospaced))
@@ -136,5 +149,25 @@ struct AICommandOutputCard: View {
         .padding(11)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
         .accessibilityIdentifier("ai.command.result")
+    }
+}
+
+struct AICommandLiveDuration: View {
+    let startedAt: Date
+    var fontSize: Double = 14
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            if let elapsed = CommandTimingFormatter.elapsed(
+                max(0, context.date.timeIntervalSince(startedAt))
+            ) {
+                Text("总耗时 \(elapsed)")
+                    .font(.system(size: max(12, fontSize - 1)))
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .fixedSize()
+                    .accessibilityIdentifier("ai.command.liveDuration")
+            }
+        }
     }
 }

@@ -29,19 +29,32 @@ struct AICommandResultMetadata: Codable, Equatable, Sendable {
     var command: String?
     var purpose: String?
     var omittedBytes: Int64 = 0
+    var durationSeconds: TimeInterval?
+    var totalDurationSeconds: TimeInterval?
 
     init(result: ShellCommandResult, proposal: ProposedShellCommand) {
         status = result.timedOut ? .timedOut : (result.exitCodeUnknown ? .unknown : (result.exitCode == 0 ? .completed : .failed))
         command = proposal.command
         purpose = proposal.purpose
         omittedBytes = result.omittedBytes
+        durationSeconds = result.durationSeconds
+        totalDurationSeconds = result.totalDurationSeconds
     }
 
-    init(status: AICommandStatus, command: String? = nil, purpose: String? = nil, omittedBytes: Int64 = 0) {
+    init(
+        status: AICommandStatus,
+        command: String? = nil,
+        purpose: String? = nil,
+        omittedBytes: Int64 = 0,
+        durationSeconds: TimeInterval? = nil,
+        totalDurationSeconds: TimeInterval? = nil
+    ) {
         self.status = status
         self.command = command
         self.purpose = purpose
         self.omittedBytes = omittedBytes
+        self.durationSeconds = durationSeconds
+        self.totalDurationSeconds = totalDurationSeconds
     }
 }
 
@@ -51,6 +64,8 @@ struct AICommandResultPresentation {
     var command: String?
     var purpose: String?
     var isPartial: Bool
+    var durationSeconds: TimeInterval?
+    var totalDurationSeconds: TimeInterval?
 
     init(message: ChatMessage, descriptor: AITranscriptCommandDescriptor? = nil) {
         let parsed = Self.envelope(message.content ?? "")
@@ -59,6 +74,27 @@ struct AICommandResultPresentation {
         command = message.commandResult?.command ?? descriptor?.command
         purpose = message.commandResult?.purpose ?? descriptor?.purpose
         isPartial = (message.commandResult?.omittedBytes ?? 0) > 0
+        durationSeconds = message.commandResult?.durationSeconds
+        totalDurationSeconds = message.commandResult?.totalDurationSeconds
+    }
+
+    var durationText: String? {
+        CommandTimingFormatter.elapsed(totalDurationSeconds ?? durationSeconds)
+    }
+
+    var durationLabel: String {
+        totalDurationSeconds == nil ? "耗时" : "总耗时"
+    }
+
+    var runDurationText: String? {
+        guard totalDurationSeconds != nil else { return nil }
+        return CommandTimingFormatter.elapsed(durationSeconds)
+    }
+
+    var showsRunDuration: Bool {
+        guard let runText = CommandTimingFormatter.elapsed(durationSeconds),
+              let totalText = CommandTimingFormatter.elapsed(totalDurationSeconds) else { return false }
+        return runText != totalText
     }
 
     // Saved transcripts from older versions have no local metadata. Only parse

@@ -1,6 +1,11 @@
 import AppKit
 import SwiftUI
 
+private struct QuickCommandDurationNotice: Identifiable {
+    let id = UUID()
+    let text: String
+}
+
 struct TerminalSession: Identifiable {
     let id: UUID
     let host: SSHHost?
@@ -254,6 +259,7 @@ struct TerminalWorkspace: View {
     @State private var assistantModels = AssistantModelRegistry.shared
     @State private var closingSessionIDs = Set<UUID>()
     @State private var quickCommandRunningIDs = Set<UUID>()
+    @State private var quickCommandNotices: [QuickCommandDurationNotice] = []
 
     init() {
         let restored = TerminalSessionStore.load(hosts: SSHHostStore.load())
@@ -304,6 +310,13 @@ struct TerminalWorkspace: View {
 
     var body: some View {
         folderOpenRouting
+            .overlay(alignment: .topTrailing) {
+                quickCommandNoticeOverlay
+            }
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.2),
+                value: quickCommandNotices.map(\.id)
+            )
             .focusedSceneValue(\.terminalActionsAvailable, !isSMBTarget && page == .terminal)
             .background(WorkspaceWindowReader { window in
                 workspaceWindowNumber = window.windowNumber
@@ -661,6 +674,23 @@ struct TerminalWorkspace: View {
 
     // MARK: - Quick commands
 
+    private var quickCommandNoticeOverlay: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            ForEach(quickCommandNotices) { notice in
+                Label(notice.text, systemImage: "stopwatch")
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(.quaternary))
+                    .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("quickCommands.durationNotice")
+            }
+        }
+        .padding(18)
+    }
+
     private func runQuickCommand(_ command: String) -> String? {
         guard !isSMBTarget, let session = selectedSession else { return "请先选择一个终端。" }
         guard !closingSessionIDs.contains(session.id), !quickCommandRunningIDs.contains(session.id) else {
@@ -693,9 +723,23 @@ struct TerminalWorkspace: View {
             )
             if outcome.unavailable {
                 errorMessage = "快捷命令未执行：\(outcome.unavailableReason ?? "终端不可用")"
+            } else {
+                let prefix = outcome.timedOut ? "快捷命令已中断" : "快捷命令完成"
+                let duration = CommandTimingFormatter.elapsed(outcome.durationSeconds)
+                showQuickCommandNotice(duration.map { "\(prefix) · 运行耗时 \($0)" } ?? prefix)
             }
         }
         return nil
+    }
+
+    private func showQuickCommandNotice(_ text: String) {
+        let notice = QuickCommandDurationNotice(text: text)
+        quickCommandNotices.append(notice)
+        if quickCommandNotices.count > 4 { quickCommandNotices.removeFirst(quickCommandNotices.count - 4) }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(4))
+            quickCommandNotices.removeAll { $0.id == notice.id }
+        }
     }
 
     // MARK: - Sidebar
@@ -1057,6 +1101,7 @@ struct TerminalWorkspace: View {
                 exitCode: outcome.exitStatus ?? -1,
                 timedOut: outcome.timedOut,
                 delivery: proposal.delivery.note,
+                durationSeconds: outcome.durationSeconds,
                 exitCodeUnknown: outcome.exitStatus == nil,
                 capturedBytes: outcome.capturedBytes,
                 omittedBytes: outcome.omittedBytes,

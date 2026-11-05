@@ -401,6 +401,10 @@ struct ShellCommandResult: Sendable {
     var timedOut: Bool
     /// Short description of where the command ran, for the transcript.
     var delivery: String? = nil
+    /// Time the command itself ran, excluding preparation and queueing.
+    var durationSeconds: TimeInterval? = nil
+    /// Time from starting the approved execution to receiving the result.
+    var totalDurationSeconds: TimeInterval? = nil
     /// True when the shell did not report a status, so `exitCode` is a
     /// placeholder rather than the real result.
     var exitCodeUnknown = false
@@ -453,6 +457,7 @@ final class TerminalAIModel: ObservableObject {
     @Published private(set) var isSubmitting = false
     @Published private(set) var pendingCommand: ProposedShellCommand?
     @Published private(set) var executingCommand: ProposedShellCommand?
+    @Published private(set) var executingCommandStartedAt: Date?
     @Published private(set) var pendingQuestion: AIUserQuestion?
     @Published private(set) var isAnsweringQuestion = false
     var isWaitingForUser: Bool { pendingCommand != nil || pendingQuestion != nil }
@@ -1363,10 +1368,13 @@ final class TerminalAIModel: ObservableObject {
         let taskID = UUID()
         executionTaskID = taskID
         executingCommand = proposal
+        let executionStartedAt = Date()
+        executingCommandStartedAt = executionStartedAt
         executionTask = Task {
             defer {
                 if executionTaskID == taskID {
                     executingCommand = nil
+                    executingCommandStartedAt = nil
                     executionTask = nil
                     executionTaskID = nil
                 }
@@ -1400,7 +1408,7 @@ final class TerminalAIModel: ObservableObject {
                 return
             }
             guard turnID == id, !Task.isCancelled else { return }
-            let commandResult: ShellCommandResult
+            var commandResult: ShellCommandResult
             if let smbProfile = proposal.smbProfile {
                 activeNativeMutationCallID = proposal.id
                 commandResult = await Task.detached(priority: .userInitiated) {
@@ -1445,8 +1453,28 @@ final class TerminalAIModel: ObservableObject {
                 background.delivery = CommandDelivery.background.note
                 commandResult = background
             }
+            let totalDurationSeconds = max(
+                0,
+                Date().timeIntervalSince(executionStartedAt)
+            )
+            commandResult.totalDurationSeconds = totalDurationSeconds
+            if commandResult.durationSeconds == nil {
+                commandResult.durationSeconds = totalDurationSeconds
+            }
+            if executionTaskID == taskID {
+                executingCommand = nil
+                executingCommandStartedAt = nil
+            }
             let turnWasStopped = turnID != id || Task.isCancelled
-            if turnWasStopped, proposal.smbProfile == nil { return }
+            if turnWasStopped, proposal.smbProfile == nil {
+                await attachStoppedCommandResult(
+                    commandResult,
+                    proposal: proposal,
+                    turnID: id,
+                    requestID: requestID
+                )
+                return
+            }
             let timeoutNote = commandResult.timedOut ? "（执行超时；已尝试停止 Shell 进程，后台子进程状态待核实）" : ""
             let interruptedNote = commandResult.interruptedNotice.map { "\n中断原因：\($0)\n" } ?? ""
             let statusNote = commandResult.exitCodeUnknown
@@ -1539,6 +1567,28 @@ final class TerminalAIModel: ObservableObject {
             if !(await continueToolCalls(turnID: id)) { await requestModelTurn(turnID: id) }
             guard turnID == id else { return }
         }
+    }
+
+    /// A stopped turn already has a cancellation placeholder for this call.
+    /// Keep its transcript entry, but attach the measured runtime so the user
+    /// can still see how long the dispatched command ran before stopping.
+    private func attachStoppedCommandResult(
+        _ commandResult: ShellCommandResult,
+        proposal: ProposedShellCommand,
+        turnID: UUID,
+        requestID: UUID
+    ) async {
+        guard let index = messages.lastIndex(where: { message in
+            message.role == "tool"
+                && message.toolCallID == proposal.id
+                && message.turnID == turnID
+                && message.requestID == requestID
+        }) else { return }
+        var metadata = AICommandResultMetadata(result: commandResult, proposal: proposal)
+        metadata.status = .unknown
+        messages[index].commandResult = metadata
+        scheduleConversationArchive()
+        _ = await persistTranscript()
     }
 
     private func dispatchInspection(_ call: ChatToolCall, operation: String, turnID id: UUID) async -> Bool {
@@ -1700,6 +1750,7 @@ final class TerminalAIModel: ObservableObject {
         messages += Self.cancellationResults(for: messages, excludingToolKeys: excludedToolKeys)
         pendingCommand = nil
         executingCommand = nil
+        executingCommandStartedAt = nil
         pendingQuestion = nil
         isWorking = false
         queuedToolCalls.removeAll()
@@ -3037,6 +3088,10 @@ enum LocalShellCommandRunner {
             await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 let startedAt = Date()
+                let startedUptime = ProcessInfo.processInfo.systemUptime
+                func elapsedSeconds() -> TimeInterval {
+                    max(0, ProcessInfo.processInfo.systemUptime - startedUptime)
+                }
                 let process = state.process
                 let pipe = Pipe()
                 let sudoInput = sudoPassword == nil ? nil : Pipe()
@@ -3121,7 +3176,12 @@ enum LocalShellCommandRunner {
                 if let sudoInput { process.standardInput = sudoInput }
                 do {
                     guard try state.start() else {
-                        continuation.resume(returning: ShellCommandResult(output: "（已在启动前停止）", exitCode: -1, timedOut: false))
+                        continuation.resume(returning: ShellCommandResult(
+                            output: "（已在启动前停止）",
+                            exitCode: -1,
+                            timedOut: false,
+                            durationSeconds: elapsedSeconds()
+                        ))
                         return
                     }
                     if restrictedEnvironment {
@@ -3156,6 +3216,7 @@ enum LocalShellCommandRunner {
                     var text = String(decoding: output, as: UTF8.self)
                     if let sudoPrompt { text = text.replacingOccurrences(of: sudoPrompt, with: "需要 sudo 身份验证") }
                     if text.isEmpty { text = "（无输出）" }
+                    let durationSeconds = elapsedSeconds()
                     ExecutionHistoryStore.append(ExecutionRecord(
                         targetName: host?.displayName ?? "本机",
                         hostID: host?.id,
@@ -3163,6 +3224,7 @@ enum LocalShellCommandRunner {
                         output: text,
                         exitCode: process.terminationStatus,
                         startedAt: startedAt,
+                        durationSeconds: durationSeconds,
                         workingDirectory: workingDirectory,
                         terminalSessionID: terminalSessionID
                     ))
@@ -3170,22 +3232,30 @@ enum LocalShellCommandRunner {
                         output: text,
                         exitCode: process.terminationStatus,
                         timedOut: state.didTimeOut,
+                        durationSeconds: durationSeconds,
                         capturedBytes: Int64(output.count),
                         omittedBytes: max(0, totalOutputBytes - Int64(output.count)),
                         captureScope: .processPipe
                     ))
                 } catch {
+                    let durationSeconds = elapsedSeconds()
                     ExecutionHistoryStore.append(ExecutionRecord(
                         targetName: host?.displayName ?? "本机",
                         hostID: host?.id,
                         command: command,
                         output: error.localizedDescription,
                         exitCode: -1,
-                        startedAt: Date(),
+                        startedAt: startedAt,
+                        durationSeconds: durationSeconds,
                         workingDirectory: workingDirectory,
                         terminalSessionID: terminalSessionID
                     ))
-                    continuation.resume(returning: ShellCommandResult(output: error.localizedDescription, exitCode: -1, timedOut: false))
+                    continuation.resume(returning: ShellCommandResult(
+                        output: error.localizedDescription,
+                        exitCode: -1,
+                        timedOut: false,
+                        durationSeconds: durationSeconds
+                    ))
                 }
             }
             }

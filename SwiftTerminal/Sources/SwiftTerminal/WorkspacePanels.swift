@@ -145,7 +145,8 @@ struct SavedCommandsPanel: View {
         error = nil
         Task {
             let result = await LocalShellCommandRunner.run(expandedCommand, host: target, workingDirectory: command.workingDirectory)
-            output = "\(target?.displayName ?? "本机") · 退出码 \(result.exitCode)\n\n\(result.output)"
+            let duration = CommandTimingFormatter.elapsed(result.durationSeconds).map { " · 运行耗时 \($0)" } ?? ""
+            output = "\(target?.displayName ?? "本机") · 退出码 \(result.exitCode)\(duration)\n\n\(result.output)"
             busy = false
         }
     }
@@ -278,9 +279,14 @@ struct ExecutionHistoryPanel: View {
                     color: record.exitCode == 0 ? .green : .orange
                 )
                 Spacer()
-                Text(record.startedAt.formatted(date: .abbreviated, time: .shortened))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(record.startedAt.formatted(date: .abbreviated, time: .shortened))
+                    if let duration = CommandTimingFormatter.elapsed(record.durationSeconds) {
+                        Text("运行耗时 \(duration)").monospacedDigit()
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
             Text(record.command)
                 .font(.system(size: 11, design: .monospaced))
@@ -329,7 +335,8 @@ struct ExecutionHistoryPanel: View {
                 host: host,
                 workingDirectory: record.workingDirectory
             )
-            rerunStatus = "\(host?.displayName ?? "本机") · 退出码 \(result.exitCode)\n\(result.output)"
+            let duration = CommandTimingFormatter.elapsed(result.durationSeconds).map { " · 运行耗时 \($0)" } ?? ""
+            rerunStatus = "\(host?.displayName ?? "本机") · 退出码 \(result.exitCode)\(duration)\n\(result.output)"
             rerunBusy = false
             refresh()
         }

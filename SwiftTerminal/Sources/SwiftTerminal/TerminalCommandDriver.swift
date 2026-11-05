@@ -12,6 +12,9 @@ struct TerminalRunOutcome {
     var timedOut = false
     /// True when the shell came back to a prompt, so the session is reusable.
     var returnedToPrompt = false
+    /// Time from submitting the command to receiving its completion result.
+    /// Nil when the command was never dispatched.
+    var durationSeconds: TimeInterval? = nil
     /// True when there was no running shell behind the view.
     var unavailable = false
     /// Why the run was refused, shown to the user when a confirmed command
@@ -341,6 +344,7 @@ final class TerminalCommandDriver {
             result.timedOut = timedOut
             result.returnedToPrompt = returnedToPrompt
             result.interruptedReason = interruptedReason
+            result.durationSeconds = max(0, ProcessInfo.processInfo.systemUptime - startedAt)
             return result
         }, onCancel: {
             interruptRelay.request()

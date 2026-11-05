@@ -218,10 +218,14 @@ struct ExecutionRecord: Codable, Identifiable {
     var output: String
     var exitCode: Int32
     var startedAt: Date
+    var durationSeconds: TimeInterval?
     var workingDirectory: String?
     var terminalSessionID: UUID?
 
-    enum CodingKeys: String, CodingKey { case id, targetName, hostID, command, output, exitCode, startedAt, workingDirectory, terminalSessionID }
+    enum CodingKeys: String, CodingKey {
+        case id, targetName, hostID, command, output, exitCode, startedAt
+        case durationSeconds, workingDirectory, terminalSessionID
+    }
 
     init(
         id: UUID = UUID(),
@@ -231,6 +235,7 @@ struct ExecutionRecord: Codable, Identifiable {
         output: String,
         exitCode: Int32,
         startedAt: Date,
+        durationSeconds: TimeInterval? = nil,
         workingDirectory: String? = nil,
         terminalSessionID: UUID? = nil
     ) {
@@ -241,6 +246,7 @@ struct ExecutionRecord: Codable, Identifiable {
         self.output = output
         self.exitCode = exitCode
         self.startedAt = startedAt
+        self.durationSeconds = durationSeconds
         self.workingDirectory = workingDirectory
         self.terminalSessionID = terminalSessionID
     }
@@ -254,6 +260,7 @@ struct ExecutionRecord: Codable, Identifiable {
         output = try values.decode(String.self, forKey: .output)
         exitCode = try values.decode(Int32.self, forKey: .exitCode)
         startedAt = try values.decode(Date.self, forKey: .startedAt)
+        durationSeconds = try values.decodeIfPresent(TimeInterval.self, forKey: .durationSeconds)
         workingDirectory = try values.decodeIfPresent(String.self, forKey: .workingDirectory)
         terminalSessionID = try values.decodeIfPresent(UUID.self, forKey: .terminalSessionID)
     }
@@ -267,6 +274,88 @@ struct ConversationRecord: Codable, Identifiable {
     var messages: [ChatMessage]
     var updatedAt: Date
     var terminalSessionID: UUID? = nil
+
+    enum CodingKeys: String, CodingKey {
+        case id, targetHostID, targetName, title, messages, updatedAt, terminalSessionID
+    }
+
+    init(
+        id: UUID,
+        targetHostID: UUID?,
+        targetName: String,
+        title: String,
+        messages: [ChatMessage],
+        updatedAt: Date,
+        terminalSessionID: UUID? = nil
+    ) {
+        self.id = id
+        self.targetHostID = targetHostID
+        self.targetName = targetName
+        self.title = title
+        self.messages = messages
+        self.updatedAt = updatedAt
+        self.terminalSessionID = terminalSessionID
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        targetHostID = try values.decodeIfPresent(UUID.self, forKey: .targetHostID)
+        targetName = try values.decode(String.self, forKey: .targetName)
+        title = try values.decode(String.self, forKey: .title)
+        messages = try values.decode([ArchivedMessage].self, forKey: .messages).map(\.message)
+        updatedAt = try values.decode(Date.self, forKey: .updatedAt)
+        terminalSessionID = try values.decodeIfPresent(UUID.self, forKey: .terminalSessionID)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encodeIfPresent(targetHostID, forKey: .targetHostID)
+        try values.encode(targetName, forKey: .targetName)
+        try values.encode(title, forKey: .title)
+        try values.encode(messages.map { ArchivedMessage($0) }, forKey: .messages)
+        try values.encode(updatedAt, forKey: .updatedAt)
+        try values.encodeIfPresent(terminalSessionID, forKey: .terminalSessionID)
+    }
+
+    /// The provider wire format deliberately excludes local command metadata.
+    /// The legacy JSON archive needs that metadata, so it uses this wrapper
+    /// while remaining able to decode archives written before the wrapper.
+    private struct ArchivedMessage: Codable {
+        var message: ChatMessage
+
+        init(_ message: ChatMessage) {
+            self.message = message
+        }
+
+        init(from decoder: Decoder) throws {
+            var restored = try ChatMessage(from: decoder)
+            let values = try decoder.container(keyedBy: Keys.self)
+            restored.commandResult = try values.decodeIfPresent(
+                AICommandResultMetadata.self,
+                forKey: .commandResult
+            )
+            message = restored
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: Keys.self)
+            try values.encode(message.role, forKey: .role)
+            try values.encodeIfPresent(message.content, forKey: .content)
+            try values.encodeIfPresent(message.name, forKey: .name)
+            try values.encodeIfPresent(message.toolCallID, forKey: .toolCallID)
+            try values.encodeIfPresent(message.toolCalls, forKey: .toolCalls)
+            try values.encodeIfPresent(message.commandResult, forKey: .commandResult)
+        }
+
+        enum Keys: String, CodingKey {
+            case role, content, name
+            case toolCallID = "tool_call_id"
+            case toolCalls = "tool_calls"
+            case commandResult
+        }
+    }
 }
 
 enum ConversationArchive {

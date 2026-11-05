@@ -150,6 +150,10 @@ struct AssistantPanel: View {
                                 Text(model.executingCommand.map { "正在执行：\($0.purpose)" } ?? "AI 正在处理…")
                                     .font(.system(size: max(12, assistantFontSize - 1)))
                                     .foregroundStyle(.secondary)
+                                Spacer(minLength: 4)
+                                if let startedAt = model.executingCommandStartedAt {
+                                    AICommandLiveDuration(startedAt: startedAt, fontSize: assistantFontSize)
+                                }
                             }
                             if let command = model.executingCommand {
                                 AICommandPreview(command: command.command, fontSize: assistantFontSize)

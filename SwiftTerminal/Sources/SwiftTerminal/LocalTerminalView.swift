@@ -15,9 +15,20 @@ final class TerminalPaneView: LocalProcessTerminalView {
     private var sshStateChanged: ((SSHConnectionState) -> Void)?
     private var sshPreparation: Task<Void, Never>?
     private var sshRuntimeCredentialFile: URL?
+    private(set) var processExitRevision = 0
+    private(set) var ptyDataRevision = 0
     private var activationObserver: NSObjectProtocol?
     private var aiAutomationDispatched = false
     private var aiCancellationInterruptSent = false
+    private var activeAIrunID: UUID?
+    private var aiInputColumnsByRow: [Int: Set<Int>] = [:]
+    private var aiInputCellCount = 0
+    private var aiInputOverflowFromRow: Int?
+    private var aiInputEscapeState: UInt8 = 0
+    private var aiLastInputWasCarriageReturn = false
+    private var awaitingAIOutputStart = false
+    private var activeAIOutputStart: (nonce: String, row: Int)?
+    private let aiInputCellLimit = 16_384
     #if DEBUG
     private var sshDiagnosticChunks = 0
     private var sshDiagnosticEvents: FileHandle?
@@ -126,6 +137,15 @@ final class TerminalPaneView: LocalProcessTerminalView {
     }
 
     func receivedTitle(_ title: String) {
+        if awaitingAIOutputStart,
+           title.hasPrefix("__SWIFTTERMINAL_STARTED="),
+           let terminal {
+            let nonce = String(title.dropFirst("__SWIFTTERMINAL_STARTED=".count))
+            if !nonce.isEmpty {
+                activeAIOutputStart = (nonce, absoluteCursorRow(in: terminal))
+                awaitingAIOutputStart = false
+            }
+        }
         #if DEBUG
         if sshProgress != nil { recordSSHDiagnostic("title ready=\(title == "__SWIFTTERMINAL_READY=\(connectionGeneration.uuidString.lowercased())")") }
         #endif
@@ -142,6 +162,11 @@ final class TerminalPaneView: LocalProcessTerminalView {
         if previous != sshProgress?.state { publishSSHState() }
     }
 
+    func aiOutputStartRow(for nonce: String) -> Int? {
+        guard activeAIOutputStart?.nonce == nonce else { return nil }
+        return activeAIOutputStart?.row
+    }
+
     override func dataReceived(slice: ArraySlice<UInt8>) {
         #if DEBUG
         if sshProgress != nil, sshDiagnosticChunks < 12 {
@@ -153,6 +178,7 @@ final class TerminalPaneView: LocalProcessTerminalView {
         sshProgress?.receive(String(decoding: slice, as: UTF8.self))
         if previous != sshProgress?.state { publishSSHState() }
         super.dataReceived(slice: slice)
+        ptyDataRevision += 1
     }
 
     func startWhenSized(_ launch: @escaping () -> Void) {
@@ -196,35 +222,171 @@ final class TerminalPaneView: LocalProcessTerminalView {
         terminal.sendUserInput(data)
     }
 
-    func prepareAIAutomation() {
+    func prepareAIAutomation(runID: UUID? = nil) {
+        activeAIrunID = runID ?? UUID()
         aiAutomationDispatched = false
         aiCancellationInterruptSent = false
+        clearAIInputExclusions()
+        awaitingAIOutputStart = false
+        activeAIOutputStart = nil
+        aiInputEscapeState = 0
+        aiLastInputWasCarriageReturn = false
     }
 
-    func markAIAutomationDispatched() {
+    func markAIAutomationDispatched(runID: UUID? = nil) {
+        guard isActiveAIAutomation(runID: runID) else { return }
         aiAutomationDispatched = true
         aiCancellationInterruptSent = false
+        awaitingAIOutputStart = true
+        activeAIOutputStart = nil
     }
 
-    func finishAIAutomation() {
+    func finishAIAutomation(runID: UUID? = nil) {
+        guard isActiveAIAutomation(runID: runID) else { return }
         aiAutomationDispatched = false
         aiCancellationInterruptSent = false
+        activeAIrunID = nil
+        clearAIInputExclusions()
+        aiInputEscapeState = 0
+        aiLastInputWasCarriageReturn = false
+        awaitingAIOutputStart = false
+        activeAIOutputStart = nil
     }
 
     @discardableResult
-    func interruptAIAutomation() -> Bool {
-        guard aiAutomationDispatched, !aiCancellationInterruptSent else { return false }
+    func interruptAIAutomation(runID: UUID? = nil) -> Bool {
+        guard isActiveAIAutomation(runID: runID),
+              aiAutomationDispatched, !aiCancellationInterruptSent else { return false }
         aiCancellationInterruptSent = true
         sendAIDispatch([TerminalCommandDriver.interruptByte][...])
         return true
     }
 
     @discardableResult
-    func retryInterruptAIAutomation() -> Bool {
-        guard aiAutomationDispatched else { return false }
+    func retryInterruptAIAutomation(runID: UUID? = nil) -> Bool {
+        guard isActiveAIAutomation(runID: runID), aiAutomationDispatched else { return false }
         aiCancellationInterruptSent = true
         sendAIDispatch([TerminalCommandDriver.interruptByte][...])
         return true
+    }
+
+    func aiUserInputExclusions() -> TerminalInputExclusions {
+        TerminalInputExclusions(
+            columnsByAbsoluteRow: aiInputColumnsByRow,
+            overflowFromRow: aiInputOverflowFromRow
+        )
+    }
+
+    private func isActiveAIAutomation(runID: UUID?) -> Bool {
+        guard let activeAIrunID else { return false }
+        return runID == nil || runID == activeAIrunID
+    }
+
+    private func absoluteCursorRow(in terminal: Terminal) -> Int {
+        let retainedRowsBeforeScreen = max(
+            0, TerminalRunReading.lineCount(terminal) - terminal.getDims().rows)
+        return terminal.buffer.totalLinesTrimmed
+            + retainedRowsBeforeScreen
+            + terminal.getCursorLocation().y
+    }
+
+    private func clearAIInputExclusions() {
+        aiInputColumnsByRow.removeAll(keepingCapacity: true)
+        aiInputCellCount = 0
+        aiInputOverflowFromRow = nil
+    }
+
+    private func recordAIUserInput(
+        _ data: ArraySlice<UInt8>,
+        startingAt row: Int,
+        column startColumn: Int,
+        terminalColumns: Int
+    ) {
+        guard terminalColumns > 0 else { return }
+        var currentRow = row
+        var currentColumn = min(max(0, startColumn), terminalColumns - 1)
+        for byte in data {
+            if aiInputEscapeState != 0 {
+                switch aiInputEscapeState {
+                case 1:
+                    aiInputEscapeState = byte == 0x5B ? 2 : 0
+                case 2:
+                    if (0x40...0x7E).contains(byte) {
+                        switch byte {
+                        case 0x41: currentRow = max(0, currentRow - 1)
+                        case 0x42: currentRow += 1
+                        case 0x43: currentColumn = min(terminalColumns - 1, currentColumn + 1)
+                        case 0x44: currentColumn = max(0, currentColumn - 1)
+                        case 0x48: currentColumn = 0
+                        case 0x46: currentColumn = terminalColumns - 1
+                        default: break
+                        }
+                        aiInputEscapeState = 0
+                    }
+                default:
+                    aiInputEscapeState = 0
+                }
+                aiLastInputWasCarriageReturn = false
+                continue
+            }
+            if byte == 0x1B {
+                recordAIInputRow(currentRow, columns: terminalColumns)
+                aiInputEscapeState = 1
+                aiLastInputWasCarriageReturn = false
+                continue
+            }
+            if byte == 0x0D {
+                recordAIInputCell(
+                    row: currentRow,
+                    column: min(currentColumn, terminalColumns - 1))
+                currentColumn = 0
+                aiLastInputWasCarriageReturn = true
+                continue
+            }
+            if byte == 0x0A {
+                if !aiLastInputWasCarriageReturn {
+                    currentRow += 1
+                }
+                currentColumn = 0
+                aiLastInputWasCarriageReturn = false
+                continue
+            }
+            aiLastInputWasCarriageReturn = false
+            if byte < 0x20 || byte == 0x7F {
+                recordAIInputRow(currentRow, columns: terminalColumns)
+                if byte == 0x08 || byte == 0x7F {
+                    currentColumn = max(0, currentColumn - 1)
+                }
+                continue
+            }
+            if currentColumn >= terminalColumns {
+                currentRow += 1
+                currentColumn = 0
+            }
+            recordAIInputCell(row: currentRow, column: currentColumn)
+            currentColumn += 1
+        }
+    }
+
+    private func recordAIInputRow(_ row: Int, columns: Int) {
+        for column in 0..<columns {
+            recordAIInputCell(row: row, column: column)
+        }
+    }
+
+    private func recordAIInputCell(row: Int, column: Int) {
+        guard row >= 0, column >= 0 else { return }
+        if aiInputColumnsByRow[row]?.contains(column) == true { return }
+        if let overflowRow = aiInputOverflowFromRow {
+            aiInputOverflowFromRow = min(overflowRow, row)
+            return
+        }
+        guard aiInputCellCount < aiInputCellLimit else {
+            aiInputOverflowFromRow = row
+            return
+        }
+        aiInputColumnsByRow[row, default: []].insert(column)
+        aiInputCellCount += 1
     }
 
     /// Terminal-initiated traffic arrives through the TerminalDelegate hop.
@@ -237,6 +399,15 @@ final class TerminalPaneView: LocalProcessTerminalView {
 
     override func send(source: TerminalView, data: ArraySlice<UInt8>) {
         if !aiDispatchInFlight, !forwardingTerminalInitiatedSend {
+            if activeAIrunID != nil, aiAutomationDispatched, let terminal {
+                let cursor = terminal.getCursorLocation()
+                recordAIUserInput(
+                    data,
+                    startingAt: absoluteCursorRow(in: terminal),
+                    column: cursor.x,
+                    terminalColumns: terminal.getDims().cols
+                )
+            }
             if data.contains(0x0D) {
                 proofBox.markCommandSubmitted(generation: connectionGeneration)
             } else {
@@ -254,6 +425,7 @@ final class TerminalPaneView: LocalProcessTerminalView {
     }
 
     override func processTerminated(_ source: LocalProcess, exitCode: Int32?) {
+        processExitRevision += 1
         #if DEBUG
         if sshProgress != nil { recordSSHDiagnostic("exit=\(exitCode.map(String.init) ?? "nil")") }
         #endif

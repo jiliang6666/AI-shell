@@ -67,6 +67,41 @@ func terminalStartedProofParsing() {
     #expect(!TerminalRunReading.hasStarted(inTitle: "__SWIFTTERMINAL_STARTED=old", nonce: "abc"))
 }
 
+@Test("PTY drain reports complete, incomplete, and cancelled states")
+func ptyDrainWaitsForStableOutputAfterExit() {
+    #expect(TerminalCommandDriver.ptyDrainDecision(
+        processExitObserved: false,
+        ptyDataStableDuration: 1,
+        childFDClosed: true,
+        deadlineReached: false,
+        cancelled: false
+    ) == nil)
+    #expect(TerminalCommandDriver.ptyDrainDecision(
+        processExitObserved: true,
+        ptyDataStableDuration: 0.4,
+        childFDClosed: true,
+        deadlineReached: false,
+        cancelled: false
+    ) == .complete)
+    #expect(TerminalCommandDriver.ptyDrainDecision(
+        processExitObserved: true,
+        ptyDataStableDuration: 0.5,
+        childFDClosed: false,
+        deadlineReached: true,
+        cancelled: false
+    ) == .incomplete)
+    #expect(TerminalCommandDriver.ptyDrainDecision(
+        processExitObserved: true,
+        ptyDataStableDuration: 0,
+        childFDClosed: false,
+        deadlineReached: true,
+        cancelled: true
+    ) == .cancelled)
+    #expect(TerminalCommandDriver.addingInterruptionReason(
+        TerminalCommandDriver.ptyDrainIncompleteReason, to: nil
+    ) == "PTY 输出未完全排空，结果可能不完整")
+}
+
 @Test("Delivery modes name where a command ran")
 func commandDeliveryLabels() {
     #expect(CommandDelivery.terminal.title == "终端内执行")

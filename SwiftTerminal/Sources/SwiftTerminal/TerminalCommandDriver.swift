@@ -1,6 +1,25 @@
 import AppKit
+import Darwin
 import Foundation
 import SwiftTerm
+
+private let fionreadRequest: UInt = 0x4004_667F
+
+struct TerminalInputExclusions {
+    var columnsByAbsoluteRow: [Int: Set<Int>] = [:]
+    var overflowFromRow: Int?
+
+    var overflowInterruptionReason: String? {
+        guard overflowFromRow != nil else { return nil }
+        return "人工输入记录超限，输出尾部已安全截断"
+    }
+}
+
+enum TerminalPTYDrainStatus: Equatable {
+    case complete
+    case incomplete
+    case cancelled
+}
 
 /// What the shell printed after a command was typed into a live terminal.
 struct TerminalRunOutcome {
@@ -84,6 +103,9 @@ final class TerminalCommandDriver {
     // cancel owned work; callers/tests may still supply an explicit deadline.
     nonisolated static let defaultTimeout: TimeInterval = .infinity
     nonisolated static let outputLimit = 24_000
+    nonisolated static let ptyDrainQuietPeriod: TimeInterval = 0.4
+    nonisolated static let ptyDrainTimeout: TimeInterval = 10
+    nonisolated static let ptyDrainIncompleteReason = "PTY 输出未完全排空，结果可能不完整"
 
     private let pollInterval: Duration = .milliseconds(60)
     private var activeRuns = Set<UUID>()
@@ -118,9 +140,10 @@ final class TerminalCommandDriver {
         }
         activeRuns.insert(generation)
         defer { activeRuns.remove(generation) }
-        view.prepareAIAutomation()
-        defer { view.finishAIAutomation() }
-        let interruptRelay = TerminalInterruptRelay(pane: view)
+        let runID = UUID()
+        view.prepareAIAutomation(runID: runID)
+        defer { view.finishAIAutomation(runID: runID) }
+        let interruptRelay = TerminalInterruptRelay(pane: view, runID: runID)
 
         return await withTaskCancellationHandler(operation: {
             let readinessTimeout = AIReadinessTimeout.configured
@@ -193,7 +216,8 @@ final class TerminalCommandDriver {
                 payload = Array(wrapped.utf8)
             }
             payload.append(Self.submitByte)
-            view.markAIAutomationDispatched()
+            let initialProcessExitRevision = view.processExitRevision
+            view.markAIAutomationDispatched(runID: runID)
             view.sendAIDispatch(payload[...])
 
             let startedAt = ProcessInfo.processInfo.systemUptime
@@ -207,10 +231,21 @@ final class TerminalCommandDriver {
             var lastSentSudoPassword: String?
             var suppressPasswordCheckUntil: TimeInterval = 0
             var interruptedReason: String?
+            var timedOut = false
             while !returnedToPrompt {
                 try? await Task.sleep(for: pollInterval)
-                guard !Task.isCancelled, view.process?.running == true,
-                      view.connectionGeneration == generation else { break }
+                if Task.isCancelled {
+                    interruptedReason = "命令已取消"
+                    break
+                }
+                guard view.process?.running == true else {
+                    interruptedReason = "Shell 在返回完成证明前已退出；命令结果未确认"
+                    break
+                }
+                guard view.connectionGeneration == generation else {
+                    interruptedReason = "终端会话已重建或断开；命令结果未确认"
+                    break
+                }
             // A dispatched command that sits at `Password:` would otherwise
             // burn the whole timeout. If this task holds a sudo password and
             // the command is sudo-based, feed it once; otherwise interrupt
@@ -247,6 +282,7 @@ final class TerminalCommandDriver {
                 lastOutputSignature = signature
                 lastActivityAt = ProcessInfo.processInfo.systemUptime
             } else if ProcessInfo.processInfo.systemUptime - lastActivityAt >= idleLimit {
+                timedOut = true
                 interruptedReason = "命令 \(Int(idleLimit)) 秒没有任何输出，疑似挂起，已中断。"
                 break
             }
@@ -281,6 +317,7 @@ final class TerminalCommandDriver {
                     userTypedSincePrompt: view.proofBox.hasUserTypedSincePrompt,
                     commandSubmittedSincePrompt: view.proofBox.hasSubmittedCommandSincePrompt))
             if ProcessInfo.processInfo.systemUptime - startedAt >= timeout {
+                timedOut = true
                 interruptedReason = Self.timeoutDiagnostic(
                     terminal: terminal, title: view.proofBox.currentTitle,
                     nonce: completionNonce ?? wrapperNonce, proofArrived: proof != nil,
@@ -289,17 +326,19 @@ final class TerminalCommandDriver {
             }
         }
 
-            let timedOut = !returnedToPrompt
             if timedOut, interruptedReason == nil,
                started && proof == nil && view.connectionGeneration == generation {
                 interruptedReason = "命令在超时内未返回完成证明"
             }
-            if timedOut, view.connectionGeneration == generation {
+            if !returnedToPrompt, !Task.isCancelled, view.process?.running == true,
+               view.connectionGeneration == generation {
                 // Leave the session usable instead of wedged on a hung command.
-                view.interruptAIAutomation()
+                view.interruptAIAutomation(runID: runID)
                 var settleDeadline = ProcessInfo.processInfo.systemUptime + 2
                 while ProcessInfo.processInfo.systemUptime < settleDeadline {
                     try? await Task.sleep(for: pollInterval)
+                    guard view.process?.running == true,
+                          view.connectionGeneration == generation else { break }
                     let title = view.proofBox.currentTitle
                     let settled = unmarkedShell
                         ? TerminalRunReading.unmarkedShellReadinessProblem(
@@ -314,7 +353,7 @@ final class TerminalCommandDriver {
                 if !returnedToPrompt, !Task.isCancelled {
                     // The program may ignore SIGINT; one more attempt, then report
                     // the terminal state honestly.
-                    view.retryInterruptAIAutomation()
+                    view.retryInterruptAIAutomation(runID: runID)
                     try? await Task.sleep(for: .milliseconds(600))
                     if let terminal2 = view.terminal {
                         returnedToPrompt = unmarkedShell
@@ -331,15 +370,38 @@ final class TerminalCommandDriver {
                 settleDeadline = 0
             }
 
+            var ptyDrainStatus: TerminalPTYDrainStatus?
+            if !Task.isCancelled,
+               view.connectionGeneration == generation,
+               view.process?.running != true {
+                ptyDrainStatus = await waitForPTYDrain(
+                    view: view,
+                    generation: generation,
+                    initialProcessExitRevision: initialProcessExitRevision
+                )
+            }
+
+            let outputStartRow = view.aiOutputStartRow(for: completionNonce ?? wrapperNonce)
+            let inputExclusions = view.aiUserInputExclusions()
             let outcome = TerminalRunReading.extract(
                 terminal: terminal,
                 afterRow: lastContentRowBefore,
                 promptBoundary: nil,
                 timedOut: timedOut,
-                rowsTrimmedAtStart: rowsTrimmedAtStart
+                rowsTrimmedAtStart: rowsTrimmedAtStart,
+                echoBoundary: usesLocalShellHooks ? nil : wrapperNonce,
+                outputStartRow: outputStartRow,
+                inputExclusions: inputExclusions
             )
 
             var result = outcome
+            if let reason = inputExclusions.overflowInterruptionReason {
+                interruptedReason = Self.addingInterruptionReason(reason, to: interruptedReason)
+            }
+            if ptyDrainStatus == .incomplete {
+                interruptedReason = Self.addingInterruptionReason(
+                    Self.ptyDrainIncompleteReason, to: interruptedReason)
+            }
             result.exitStatus = proof?.exitStatus
             result.timedOut = timedOut
             result.returnedToPrompt = returnedToPrompt
@@ -349,6 +411,126 @@ final class TerminalCommandDriver {
         }, onCancel: {
             interruptRelay.request()
         })
+    }
+
+    private func waitForPTYDrain(
+        view: TerminalPaneView,
+        generation: UUID,
+        initialProcessExitRevision: Int
+    ) async -> TerminalPTYDrainStatus {
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let deadline = startedAt + Self.ptyDrainTimeout
+        var lastPTYDataRevision = view.ptyDataRevision
+        var processExitObservedAt: TimeInterval?
+        var stableSince: TimeInterval?
+
+        while true {
+            guard !Task.isCancelled, view.connectionGeneration == generation else { return .cancelled }
+            if let process = view.process, process.childfd >= 0,
+               !drainAvailablePTYData(
+                    from: process,
+                    view: view,
+                    generation: generation,
+                    deadline: deadline
+               ) {
+                return .cancelled
+            }
+            let now = ProcessInfo.processInfo.systemUptime
+            let processExitObserved = view.processExitRevision != initialProcessExitRevision
+            if processExitObserved {
+                if processExitObservedAt == nil {
+                    processExitObservedAt = now
+                    lastPTYDataRevision = view.ptyDataRevision
+                    stableSince = now
+                } else if view.ptyDataRevision != lastPTYDataRevision {
+                    lastPTYDataRevision = view.ptyDataRevision
+                    stableSince = now
+                }
+            } else {
+                lastPTYDataRevision = view.ptyDataRevision
+                stableSince = nil
+            }
+            let stableDuration = stableSince.map { now - $0 } ?? 0
+            if let status = Self.ptyDrainDecision(
+                processExitObserved: processExitObserved,
+                ptyDataStableDuration: stableDuration,
+                childFDClosed: view.process?.childfd == -1,
+                deadlineReached: now >= deadline,
+                cancelled: Task.isCancelled || view.connectionGeneration != generation
+            ) {
+                return status
+            }
+
+            do {
+                try await Task.sleep(for: .milliseconds(50))
+            } catch {
+                return .cancelled
+            }
+        }
+    }
+
+    private func drainAvailablePTYData(
+        from process: LocalProcess,
+        view: TerminalPaneView,
+        generation: UUID,
+        deadline: TimeInterval
+    ) -> Bool {
+        let descriptor = process.childfd
+        guard descriptor >= 0 else { return true }
+        let originalFlags = fcntl(descriptor, F_GETFL)
+        guard originalFlags >= 0,
+              fcntl(descriptor, F_SETFL, originalFlags | O_NONBLOCK) == 0 else { return true }
+        defer {
+            if process.childfd == descriptor {
+                _ = fcntl(descriptor, F_SETFL, originalFlags)
+            }
+        }
+
+        while ProcessInfo.processInfo.systemUptime < deadline {
+            guard !Task.isCancelled, view.connectionGeneration == generation else { return false }
+            guard process.childfd == descriptor else { return true }
+            var availableBytes: Int32 = 0
+            if ioctl(descriptor, fionreadRequest, &availableBytes) != 0 {
+                if errno == EINTR { continue }
+                return true
+            }
+            guard availableBytes > 0 else { return true }
+
+            var bytes = [UInt8](repeating: 0, count: min(Int(availableBytes), 64 * 1024))
+            let received = bytes.withUnsafeMutableBytes { buffer in
+                read(descriptor, buffer.baseAddress, buffer.count)
+            }
+            if received > 0 {
+                view.dataReceived(slice: bytes[..<received])
+                continue
+            }
+            if received < 0, errno == EINTR { continue }
+            if received < 0, errno != EAGAIN, errno != EWOULDBLOCK { return true }
+            return true
+        }
+        return true
+    }
+
+    nonisolated static func ptyDrainDecision(
+        processExitObserved: Bool,
+        ptyDataStableDuration: TimeInterval,
+        childFDClosed: Bool,
+        deadlineReached: Bool,
+        cancelled: Bool
+    ) -> TerminalPTYDrainStatus? {
+        if cancelled { return .cancelled }
+        if processExitObserved
+            && childFDClosed
+            && ptyDataStableDuration >= ptyDrainQuietPeriod {
+            return .complete
+        }
+        if deadlineReached { return .incomplete }
+        return nil
+    }
+
+    nonisolated static func addingInterruptionReason(_ reason: String, to existing: String?) -> String {
+        guard let existing, !existing.isEmpty else { return reason }
+        return "\(existing)；\(reason)"
     }
 
     // MARK: - Terminal inspection
@@ -421,20 +603,22 @@ final class TerminalCommandDriver {
 
 private final class TerminalInterruptRelay: @unchecked Sendable {
     private let pane: TerminalPaneView
+    private let runID: UUID
 
-    init(pane: TerminalPaneView) {
+    init(pane: TerminalPaneView, runID: UUID) {
         self.pane = pane
+        self.runID = runID
     }
 
     func request() {
         if Thread.isMainThread {
             _ = MainActor.assumeIsolated {
-                pane.interruptAIAutomation()
+                pane.interruptAIAutomation(runID: runID)
             }
         } else {
-            DispatchQueue.main.async { [pane] in
+            DispatchQueue.main.async { [pane, runID = self.runID] in
                 _ = MainActor.assumeIsolated {
-                    pane.interruptAIAutomation()
+                    pane.interruptAIAutomation(runID: runID)
                 }
             }
         }
@@ -467,7 +651,7 @@ __swiftterminal_end() {
 """#
 
     static func wrap(_ command: String, nonce: String) -> String {
-        "__swiftterminal_begin \(quote(nonce)); builtin eval -- \(quote(command)); __swiftterminal_end $?"
+        "__swiftterminal_begin \(quote(nonce)); builtin eval -- \(quote(command)); __swiftterminal_end $? \(quote(nonce))"
     }
 
     /// Feed the actual command to an integrated local zsh. Bracketed paste
@@ -816,42 +1000,123 @@ enum TerminalRunReading {
         afterRow: Int,
         promptBoundary: Int?,
         timedOut: Bool,
-        rowsTrimmedAtStart: Int = 0
+        rowsTrimmedAtStart: Int = 0,
+        echoBoundary: String? = nil,
+        outputStartRow: Int? = nil,
+        inputExclusions: TerminalInputExclusions = TerminalInputExclusions()
     ) -> TerminalRunOutcome {
         let count = lineCount(terminal)
-        let removedRows = max(0, terminal.buffer.totalLinesTrimmed - rowsTrimmedAtStart)
-        let start = max(0, afterRow + 1 - removedRows)
         let end = min(count, promptBoundary.map { $0 + 1 } ?? count)
+        let start: Int
+        if let outputStartRow {
+            start = min(end, max(0, outputStartRow - terminal.buffer.totalLinesTrimmed))
+        } else {
+            let removedRows = max(0, terminal.buffer.totalLinesTrimmed - rowsTrimmedAtStart)
+            start = max(0, afterRow + 1 - removedRows)
+        }
         guard start < end else { return TerminalRunOutcome() }
-        var lines: [String] = []
-        var hasMarkedOutput = false
-        var fallback: [String] = []
+
+        struct Row {
+            let text: String
+            let markedOutput: String
+            let role: SemanticContent?
+            let isWrapped: Bool
+            let hasOutputCells: Bool
+            let hasVisibleMarkedOutput: Bool
+        }
+
+        var rows: [Row] = []
         for row in start..<end {
+            let absoluteRow = terminal.buffer.totalLinesTrimmed + row
+            if let overflowFromRow = inputExclusions.overflowFromRow,
+               absoluteRow >= overflowFromRow {
+                continue
+            }
             guard let line = terminal.bufferLine(atRow: row) else { continue }
-            var output = ""
-            var hasOutput = false
+            var markedOutput = ""
+            var hasOutputCells = false
+            var text = ""
+            let excludedColumns = inputExclusions.columnsByAbsoluteRow[absoluteRow] ?? []
             for col in 0..<terminal.getDims().cols {
                 let cell = line[col]
-                guard cell.semanticContent == .output else { continue }
-                hasOutput = true
+                let width = max(1, Int(cell.width))
+                let occupiedColumns = col..<min(terminal.getDims().cols, col + width)
+                let isExcluded = occupiedColumns.contains(where: excludedColumns.contains)
+                if isExcluded { continue }
+                if cell.semanticContent == .output { hasOutputCells = true }
                 guard cell.width != 0 else { continue }
                 let character = cell.getCharacter()
-                output += character == "\0" ? " " : String(character)
+                let value = character == "\0" ? " " : String(character)
+                text += value
+                if cell.semanticContent == .output { markedOutput += value }
             }
-            if hasOutput {
-                hasMarkedOutput = true
-                // Wrapped rows join without an artificial newline. Keep spaces
-                // at a full-width boundary; only trim final screen padding.
-                if terminal.bufferLine(atRow: row + 1)?.isWrapped != true {
-                    while let last = output.last, last == " " || last == "\t" { output.removeLast() }
+            while let last = text.last, last == " " || last == "\t" {
+                text.removeLast()
+            }
+            rows.append(Row(
+                text: text,
+                markedOutput: markedOutput,
+                role: rowRole(terminal, row: row),
+                isWrapped: line.isWrapped,
+                hasOutputCells: hasOutputCells,
+                hasVisibleMarkedOutput: markedOutput.contains { !$0.isWhitespace }
+            ))
+        }
+
+        // Custom bash startup hooks can emit another OSC 133 input marker
+        // immediately before the command body. That re-tags stdout/stderr as
+        // input even though the terminal still shows it. Find the echoed
+        // wrapper's final nonce and allow input-tagged rows only after that
+        // boundary, so the command echo itself can never leak into the result.
+        var fallbackStart = outputStartRow == nil ? rows.count : 0
+        if outputStartRow == nil, let echoBoundary {
+            var logicalText = ""
+            var logicalEnd = -1
+            for index in rows.indices {
+                logicalText += rows[index].text
+                logicalEnd = index
+                let continues = index + 1 < rows.count && rows[index + 1].isWrapped
+                guard !continues else { continue }
+                let isWrapperEnd = logicalText.contains(echoBoundary)
+                    && (logicalText.contains("__swiftterminal_end")
+                        || logicalText.contains("__swiftterminal_st=$?"))
+                if isWrapperEnd {
+                    fallbackStart = logicalEnd + 1
+                    break
                 }
-                if line.isWrapped, !lines.isEmpty { lines[lines.count - 1] += output }
-                else { lines.append(output) }
-            } else if !hasMarkedOutput, rowRole(terminal, row: row) == nil {
-                fallback.append(line.translateToString(trimRight: true))
+                logicalText = ""
+                logicalEnd = -1
             }
         }
-        let text = trimmedBlock(hasMarkedOutput ? lines : fallback)
+
+        var lines: [String] = []
+        for index in rows.indices {
+            if outputStartRow == nil, echoBoundary != nil, index < fallbackStart { continue }
+            let row = rows[index]
+            let isPromptRow: Bool
+            if case .prompt? = row.role { isPromptRow = true } else { isPromptRow = false }
+            let canUseFallback = !isPromptRow
+                && (index >= fallbackStart || (echoBoundary == nil && row.role == nil))
+            let useMarked = row.hasVisibleMarkedOutput
+                || (row.hasOutputCells && row.text.trimmingCharacters(in: .whitespaces).isEmpty)
+                || (row.hasOutputCells && !canUseFallback)
+            var output: String
+            if useMarked {
+                output = row.markedOutput
+                // Wrapped rows join without an artificial newline. Keep spaces
+                // at a full-width boundary; only trim final screen padding.
+                if index + 1 >= rows.count || !rows[index + 1].isWrapped {
+                    while let last = output.last, last == " " || last == "\t" { output.removeLast() }
+                }
+            } else if canUseFallback {
+                output = row.text
+            } else {
+                continue
+            }
+            if row.isWrapped, !lines.isEmpty { lines[lines.count - 1] += output }
+            else { lines.append(output) }
+        }
+        let text = trimmedBlock(lines)
         let captured = AIToolOutputLimiter.capture(text)
         return TerminalRunOutcome(output: captured.text, capturedBytes: captured.capturedBytes,
             omittedBytes: captured.omittedBytes, captureScope: .renderedTerminalBuffer)

@@ -21,9 +21,9 @@ RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 UPDATE_REPOSITORY="${ZHANQIAO_UPDATE_REPOSITORY:-jiliang6666/AI-shell}"
 UPDATE_PUBLIC_KEY="${ZHANQIAO_UPDATE_PUBLIC_KEY:-Fd2DQDZ/nrE3xmzNRzxaITrFvy4L4cfnFf5Y/pCTY44=}"
-APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.11}"
-APP_BUILD="${ZHANQIAO_APP_BUILD:-111}"
-UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-111}"
+APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.12}"
+APP_BUILD="${ZHANQIAO_APP_BUILD:-112}"
+UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-112}"
 UPDATE_FEED_URL=""
 case "$APP_VERSION" in ''|*[!0-9.]*) echo "Invalid ZHANQIAO_APP_VERSION." >&2; exit 2 ;; esac
 case "$APP_BUILD" in ''|*[!0-9]*) echo "Invalid ZHANQIAO_APP_BUILD." >&2; exit 2 ;; esac
@@ -112,6 +112,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST
 PLIST
 # Copied/generated artifacts can inherit Finder metadata that codesign rejects.
 xattr -cr "$APP"
+find "$APP" -exec xattr -d com.apple.FinderInfo {} \; 2>/dev/null || true
+find "$APP" -exec xattr -d 'com.apple.fileprovider.fpfs#P' {} \; 2>/dev/null || true
 if [ -n "${SIGN_IDENTITY:-}" ]; then
     codesign --force --deep --options runtime --timestamp --sign "$SIGN_IDENTITY" "$APP"
 elif [ "${NOTARIZE:-0}" = "1" ]; then

@@ -267,6 +267,57 @@ func localTerminalPTYExecutionAndRollback() async throws {
     #expect(!FileManager.default.fileExists(atPath: root.path))
 }
 
+@Test("Exited shell output includes the final PTY sentinel", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
+@MainActor
+func localTerminalExitDrainCapturesFinalSentinel() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("TerminalPTYDrain-\(UUID())")
+    let startup = root.appendingPathComponent("user-startup")
+    try FileManager.default.createDirectory(at: startup, withIntermediateDirectories: true)
+    let pane = TerminalPaneView(frame: NSRect(x: 0, y: 0, width: 800, height: 500))
+    defer {
+        if pane.process?.running == true { pane.terminate() }
+        try? FileManager.default.removeItem(at: root)
+    }
+    pane.installProcessDelegate()
+    let integration = try #require(ZshShellIntegration.prepare(
+        generation: pane.connectionGeneration,
+        directory: root.appendingPathComponent("integration"),
+        userStartupDirectory: startup.path
+    ))
+    let status = root.appendingPathComponent("status")
+    let environment = integration.environment + [
+        "TERM=xterm-256color",
+        "LANG=en_US.UTF-8",
+        "PATH=/usr/bin:/bin",
+        "HISTFILE=",
+        "SWIFTTERMINAL_EXIT_STATUS_FILE=\(status.path)"
+    ]
+    pane.startProcess(
+        executable: "/bin/zsh",
+        args: ["-i"],
+        environment: environment,
+        execName: nil,
+        currentDirectory: root.path
+    )
+
+    let result = await TerminalCommandDriver().run("""
+    printf 'PTY_CHUNK_ONE\\n'
+    /bin/sleep 0.12
+    printf 'PTY_CHUNK_TWO\\n'
+    /bin/sleep 0.12
+    printf 'PTY_FINAL_STDOUT_SENTINEL\\n'
+    printf 'PTY_FINAL_STDERR_SENTINEL\\n' >&2
+    exit 0
+    """, in: pane, proofSource: .statusFile(status, generation: pane.connectionGeneration), timeout: 5)
+    #expect(!result.unavailable)
+    #expect(!result.timedOut)
+    #expect(result.output.contains("PTY_CHUNK_ONE"))
+    #expect(result.output.contains("PTY_CHUNK_TWO"))
+    #expect(result.output.contains("PTY_FINAL_STDOUT_SENTINEL"))
+    #expect(result.output.contains("PTY_FINAL_STDERR_SENTINEL"))
+    #expect(pane.process?.childfd == -1)
+}
+
 @Test("A shell without integration refuses AI auto-input while manual input keeps working", .enabled(if: ProcessInfo.processInfo.environment["AI_RUN_LOCAL_PTY_TESTS"] == "1"))
 @MainActor
 func noIntegrationShellRejectsAIAutoInputAndKeepsManualInput() async throws {
@@ -428,13 +479,16 @@ func isolatedSSHDriverCompletionForBashAndZsh() async throws {
         try #require(connected, "The prepared SSH session must reach a prompt before driver input")
         let driver = TerminalCommandDriver()
         let marker = "SSH_\(remoteShell.uppercased())_OK"
-        let first = await driver.run("pwd\nprintf '\(marker)\\n'", in: pane,
+        let first = await driver.run(
+            "pwd\nprintf '\(marker)\\n'\nprintf 'SSH_STDERR_OK\\n' >&2",
+            in: pane,
             proofSource: plan.proofSource, timeout: 20)
         #expect(!first.unavailable)
         #expect(!first.timedOut)
         #expect(first.returnedToPrompt)
         #expect(first.exitStatus == 0)
         #expect(first.output.contains(marker))
+        #expect(first.output.contains("SSH_STDERR_OK"))
         #expect(!first.output.contains("__swiftterminal_begin"))
         #expect(!first.output.contains("__SWIFTTERMINAL"))
         #expect(connectionStates.first == .connecting)
@@ -528,7 +582,15 @@ func isolatedSSHDriverCompletionForBashAndZsh() async throws {
         #expect(second.returnedToPrompt)
         #expect(second.output.contains("SSH_REUSE_OK"))
         let pid = try #require(pane.process?.shellPid)
-        pane.send(data: Array("exit\r".utf8)[...])
+        let shellExit = await driver.run(
+            "printf 'SSH_EXIT_LINE_01\\n'\nprintf 'SSH_EXIT_LINE_02\\n'\nprintf 'SSH_EXIT_LINE_03\\n'\nprintf 'SSH_EXIT_LINE_04\\n'\nprintf 'SSH_EXIT_LINE_05\\n'\nprintf 'SSH_EXIT_LINE_06\\n'\nprintf 'SSH_EXIT_LINE_07\\n'\nprintf 'SSH_EXIT_STDERR\\n' >&2\nprintf 'SSH_EXIT_FINAL_SENTINEL\\n'\nexit 3",
+            in: pane, proofSource: plan.proofSource, timeout: 10)
+        #expect(!shellExit.timedOut)
+        #expect(!shellExit.returnedToPrompt)
+        #expect(shellExit.interruptedReason?.contains("退出") == true)
+        #expect(shellExit.output.contains("SSH_EXIT_LINE_07"))
+        #expect(shellExit.output.contains("SSH_EXIT_STDERR"))
+        #expect(shellExit.output.contains("SSH_EXIT_FINAL_SENTINEL"))
         let exitDeadline = ContinuousClock.now.advanced(by: .seconds(5))
         while kill(pid, 0) == 0 && ContinuousClock.now < exitDeadline {
             try await Task.sleep(for: .milliseconds(50))

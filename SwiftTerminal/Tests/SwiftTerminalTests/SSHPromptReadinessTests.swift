@@ -450,7 +450,7 @@ func sudoPasswordPromptInterruptsFast() async throws {
         proofSource: .title(generation: pane.connectionGeneration), timeout: 30,
         requiresSudoPassword: true, sudoPasswordProvider: nil)
     let elapsed = ContinuousClock.now - started
-    #expect(result.timedOut)
+    #expect(!result.timedOut)
     #expect(result.interruptedReason?.contains("密码") == true,
         "expected password-prompt interrupt, got: \(result.interruptedReason ?? "nil")")
     #expect(elapsed < .seconds(8), "password prompts must fail fast, took \(elapsed)")

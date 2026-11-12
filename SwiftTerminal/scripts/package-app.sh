@@ -8,7 +8,7 @@ export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-$BUILD_SCRATCH_PATH/c
 BUILD_SDK_PATH="${BUILD_SDK_PATH:-$(xcrun --sdk macosx --show-sdk-path)}"
 # Match the selected compiler's SDK even when Command Line Tools and Xcode
 # were updated independently; SwiftPM's cached SDK choice can otherwise differ.
-SDKROOT="$BUILD_SDK_PATH" swift build -c release --disable-sandbox --scratch-path "$BUILD_SCRATCH_PATH" --sdk "$BUILD_SDK_PATH"
+SDKROOT="$BUILD_SDK_PATH" swift build -c release --disable-sandbox -debug-info-format none --scratch-path "$BUILD_SCRATCH_PATH" --sdk "$BUILD_SDK_PATH"
 
 APP="${APP_OUTPUT:-$ROOT/build/栈桥.app}"
 case "$APP" in
@@ -21,9 +21,9 @@ RESOURCES="$CONTENTS/Resources"
 FRAMEWORKS="$CONTENTS/Frameworks"
 UPDATE_REPOSITORY="${ZHANQIAO_UPDATE_REPOSITORY:-jiliang6666/AI-shell}"
 UPDATE_PUBLIC_KEY="${ZHANQIAO_UPDATE_PUBLIC_KEY:-Fd2DQDZ/nrE3xmzNRzxaITrFvy4L4cfnFf5Y/pCTY44=}"
-APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.12}"
-APP_BUILD="${ZHANQIAO_APP_BUILD:-112}"
-UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-112}"
+APP_VERSION="${ZHANQIAO_APP_VERSION:-1.0.13}"
+APP_BUILD="${ZHANQIAO_APP_BUILD:-113}"
+UPDATE_REVISION="${ZHANQIAO_UPDATE_REVISION:-113}"
 UPDATE_FEED_URL=""
 case "$APP_VERSION" in ''|*[!0-9.]*) echo "Invalid ZHANQIAO_APP_VERSION." >&2; exit 2 ;; esac
 case "$APP_BUILD" in ''|*[!0-9]*) echo "Invalid ZHANQIAO_APP_BUILD." >&2; exit 2 ;; esac

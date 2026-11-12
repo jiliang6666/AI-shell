@@ -25,6 +25,73 @@ private actor QueuedAIHTTPTransport: AIHTTPStreamTransport {
     }
 }
 
+@Test("An untrusted relative scan is rejected before dispatch and the assistant can replan", arguments: [false, true])
+@MainActor
+func untrustedRelativeScanReplansWithoutDispatch(_ savedAction: Bool) async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("AIScanReplan-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let action = SavedCommand(
+        name: "寻找软件",
+        description: "扫描测试",
+        command: "du -sh .",
+        hostID: nil,
+        workingDirectory: "/Users/mac/Projects/App"
+    )
+    var workspace = WorkspaceData()
+    workspace.savedCommands = [action]
+    let (model, _, transport, _) = try await makeHTTPModel(directory: directory, status: 200, retryAfter: nil, workspace: workspace)
+    defer { model.stop() }
+    #expect(await model.setPermission(.terminalOnly, sessionID: model.conversationID))
+    let generation = UUID()
+    model.terminalBindingProvider = { TerminalBindingStatus(available: true, generation: generation, reason: nil) }
+    var commands: [String] = []
+    model.terminalCommandRunner = { proposal in
+        commands.append(proposal.command)
+        return ShellCommandResult(output: "disk-metadata", exitCode: 0, timedOut: false)
+    }
+    func response(callID: String, name: String, arguments: [String: String]) throws -> AIHTTPStreamResponse {
+        let argumentsJSON = String(decoding: try JSONSerialization.data(withJSONObject: arguments), as: UTF8.self)
+        let delta: [String: Any] = ["choices": [["delta": ["tool_calls": [[
+            "index": 0, "id": callID, "type": "function",
+            "function": ["name": name, "arguments": argumentsJSON]
+        ]]], "finish_reason": "tool_calls"]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: delta), as: UTF8.self)
+        return httpStreamResponse(status: 200, body: "data: \(json)\n\ndata: [DONE]\n\n")
+    }
+    await transport.replaceResponses([
+        try response(
+            callID: "root-scan",
+            name: savedAction ? "run_saved_action" : "run_command",
+            arguments: savedAction ? ["actionID": action.id.uuidString] : ["command": "du -sh .", "purpose": "寻找软件"]
+        ),
+        try response(callID: "metadata", name: "run_command", arguments: ["command": "df -h /", "purpose": "先读取磁盘元数据"]),
+        httpStreamResponse(status: 200, body: "data: {\"choices\":[{\"delta\":{\"content\":\"replanned\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+    ])
+
+    #expect(await model.send("定位待搬运的软件"))
+    await model.waitForCurrentTurnCompletion()
+    let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+    while model.isWorking, ContinuousClock.now < deadline {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    #expect(!model.isWorking)
+    #expect(commands == ["df -h /"])
+    #expect(model.pendingCommand == nil)
+    #expect(model.errorMessage == nil)
+    #expect(model.messages.last?.content == "replanned")
+    #expect(model.messages.contains { $0.role == "tool" && $0.toolCallID == "root-scan" && $0.content?.isEmpty == false })
+    let request = try #require(await transport.capturedRequests().first)
+    let body = try #require(request.httpBody)
+    let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+    let messages = try #require(object["messages"] as? [[String: Any]])
+    let systemPrompt = messages.filter { $0["role"] as? String == "system" }.compactMap { $0["content"] as? String }.joined()
+    #expect(systemPrompt.contains("已有证据"))
+    #expect(systemPrompt.contains("筛选条件"))
+    #expect(systemPrompt.contains("不要设置自动超时"))
+    #expect(!systemPrompt.contains("最多 30 秒"))
+}
+
 @Test("Model streaming requests have a finite 120-second idle timeout")
 @MainActor
 func modelStreamRequestHasBoundedIdleTimeout() async throws {

@@ -18,31 +18,6 @@ final class ComposerTextView: NSTextView {
         }
     }
 
-    override var intrinsicContentSize: NSSize {
-        // Ensure layout with the final width before measuring, otherwise the
-        // used rect reflects a stale/zero-width container and the field grows
-        // absurdly tall.
-        if let layoutManager, let textContainer {
-            layoutManager.ensureLayout(for: textContainer)
-        }
-        let used = layoutManager?.usedRect(for: textContainer!).height ?? 0
-        let lineHeight = font?.boundingRectForFont.height ?? 16
-        let minHeight: CGFloat = 46
-        let maxHeight = lineHeight * 8 + textContainerInset.height * 2
-        let height = min(max(used + textContainerInset.height * 2, minHeight), maxHeight)
-        return NSSize(width: NSView.noIntrinsicMetric, height: height)
-    }
-
-    override func layout() {
-        super.layout()
-        invalidateIntrinsicContentSize()
-    }
-
-    override func didChangeText() {
-        super.didChangeText()
-        invalidateIntrinsicContentSize()
-    }
-
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if string.isEmpty, !placeholder.isEmpty {
@@ -64,6 +39,8 @@ struct ComposerTextField: NSViewRepresentable {
     var disabled: Bool
     var onSubmit: () -> Void
 
+    private let minimumHeight: CGFloat = 62
+
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
@@ -73,18 +50,25 @@ struct ComposerTextField: NSViewRepresentable {
         func textDidChange(_ notification: Notification) {
             guard let view = notification.object as? ComposerTextView else { return }
             parent.text = view.string
-            view.invalidateIntrinsicContentSize()
         }
     }
 
-    func makeNSView(context: Context) -> ComposerTextView {
-        let view = ComposerTextView()
+    func makeNSView(context: Context) -> NSScrollView {
+        let scrollView = NSScrollView()
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.autohidesScrollers = true
+
+        let view = ComposerTextView(frame: scrollView.contentView.bounds)
         view.isRichText = false
         view.allowsUndo = true
         view.drawsBackground = false
         view.textContainerInset = NSSize(width: 2, height: 8)
-        view.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        view.textContainer?.containerSize = NSSize(width: scrollView.contentSize.width, height: .greatestFiniteMagnitude)
         view.textContainer?.widthTracksTextView = true
+        view.minSize = NSSize(width: 0, height: minimumHeight)
+        view.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         view.isHorizontallyResizable = false
         view.isVerticallyResizable = true
         view.autoresizingMask = [.width]
@@ -96,17 +80,38 @@ struct ComposerTextField: NSViewRepresentable {
         view.setAccessibilityElement(true)
         view.setAccessibilityRole(.textArea)
         view.setAccessibilityLabel(placeholder)
-        return view
+        scrollView.documentView = view
+        return scrollView
     }
 
-    func updateNSView(_ view: ComposerTextView, context: Context) {
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let view = scrollView.documentView as? ComposerTextView else { return }
         context.coordinator.parent = self
         if view.string != text { view.string = text }
         view.placeholder = placeholder
-        view.font = font
+        if view.font != font { view.font = font }
         view.onReturn = onSubmit
         view.isEditable = !disabled
         view.isSelectable = true
         view.alphaValue = disabled ? 0.5 : 1
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView scrollView: NSScrollView, context: Context) -> CGSize? {
+        guard let width = proposal.width, width.isFinite,
+              let view = scrollView.documentView as? ComposerTextView,
+              let container = view.textContainer else { return nil }
+        let horizontalPadding = 2 * (view.textContainerInset.width + container.lineFragmentPadding)
+        let verticalPadding = 2 * view.textContainerInset.height
+        let lineHeight = view.layoutManager?.defaultLineHeight(for: font) ?? font.boundingRectForFont.height
+        let maximumHeight = max(minimumHeight, ceil(lineHeight * 8 + verticalPadding))
+        let draft = text
+        let measuredText = draft.last?.isNewline == true ? draft + "\u{200B}" : draft
+        let used = (measuredText as NSString).boundingRect(
+            with: NSSize(width: max(1, width - horizontalPadding), height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        let height = min(max(ceil(used.height + verticalPadding), minimumHeight), maximumHeight)
+        return CGSize(width: width, height: height)
     }
 }

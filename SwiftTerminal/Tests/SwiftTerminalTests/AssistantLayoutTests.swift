@@ -4,6 +4,79 @@ import SwiftUI
 import Testing
 @testable import SwiftTerminal
 
+@Test("Long chat drafts wrap when resized and scroll inside the composer")
+@MainActor
+func composerWrapsAndScrollsLongDrafts() throws {
+    _ = NSApplication.shared
+    let hosting = NSHostingView(rootView: ComposerLayoutFixture())
+    let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 344, height: 400),
+        styleMask: [.borderless], backing: .buffered, defer: false)
+    window.isReleasedWhenClosed = false
+    window.contentView = hosting
+    defer { window.close() }
+    hosting.layoutSubtreeIfNeeded()
+
+    let editor = try #require(findComposer(in: hosting))
+    let scrollView = try #require(editor.enclosingScrollView)
+    let layoutManager = try #require(editor.layoutManager)
+    let container = try #require(editor.textContainer)
+    let initialHeight = scrollView.frame.height
+    #expect(window.makeFirstResponder(editor))
+
+    let paragraph = String(repeating: "这是一段测试自动换行的文本。", count: 8)
+    editor.insertText(paragraph, replacementRange: NSRange(location: 0, length: 0))
+    hosting.layoutSubtreeIfNeeded()
+    layoutManager.ensureLayout(for: container)
+    let narrowHeight = scrollView.frame.height
+    let narrowTextHeight = layoutManager.usedRect(for: container).height
+    #expect(narrowHeight > initialHeight)
+    #expect(editor.frame.width == scrollView.contentSize.width)
+
+    window.setContentSize(NSSize(width: 520, height: 400))
+    hosting.layoutSubtreeIfNeeded()
+    layoutManager.ensureLayout(for: container)
+    #expect(layoutManager.usedRect(for: container).height < narrowTextHeight)
+    #expect(scrollView.frame.height < narrowHeight)
+
+    let longDraft = paragraph + "\n" + String(repeating: "longToken", count: 200) + "\n末尾"
+    editor.insertText(longDraft, replacementRange: NSRange(location: 0, length: editor.string.utf16.count))
+    hosting.layoutSubtreeIfNeeded()
+    layoutManager.ensureLayout(for: container)
+    #expect(editor.string == longDraft)
+    #expect(!scrollView.hasHorizontalScroller)
+    #expect(layoutManager.usedRect(for: container).maxX + editor.textContainerOrigin.x <= editor.bounds.width)
+    #expect(editor.frame.height > scrollView.contentSize.height)
+    #expect(scrollView.frame.height < 200)
+
+    #expect(scrollView.contentView.bounds.minY > 0)
+    editor.scrollRangeToVisible(NSRange(location: 0, length: 0))
+    #expect(scrollView.contentView.bounds.minY == 0)
+    editor.scrollRangeToVisible(NSRange(location: longDraft.utf16.count, length: 0))
+    #expect(scrollView.contentView.bounds.minY > 0)
+
+    editor.insertText("", replacementRange: NSRange(location: 0, length: longDraft.utf16.count))
+    hosting.layoutSubtreeIfNeeded()
+    #expect(scrollView.frame.height == initialHeight)
+    #expect(scrollView.contentView.bounds.minY == 0)
+}
+
+private struct ComposerLayoutFixture: View {
+    @State private var draft = ""
+
+    var body: some View {
+        ComposerTextField(text: $draft, placeholder: "输入任务", font: .monospacedSystemFont(ofSize: 13, weight: .regular),
+            disabled: false, onSubmit: {})
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxHeight: .infinity, alignment: .top)
+    }
+}
+
+@MainActor
+private func findComposer(in view: NSView) -> ComposerTextView? {
+    (view as? ComposerTextView) ?? view.subviews.lazy.compactMap { findComposer(in: $0) }.first
+}
+
 @Test("Native chat controls, history and detail cards render using isolated fixtures")
 @MainActor
 func assistantLayoutPreviewWithIsolatedData() async throws {

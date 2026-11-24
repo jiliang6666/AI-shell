@@ -312,7 +312,7 @@ struct AssistantPanel: View {
                         disabled: model.isSubmitting || model.isWorking || model.isWaitingForUser,
                         onSubmit: send
                     )
-                    .frame(maxWidth: .infinity, minHeight: 62, alignment: .topLeading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityLabel("任务输入框")
                 }

@@ -33,3 +33,14 @@ DOWNLOAD_URL_PREFIX="https://github.com/$UPDATE_REPOSITORY/releases/download/v$A
     --versions "$UPDATE_REVISION" \
     --maximum-deltas 5 \
     "$ARCHIVE_DIR"
+
+# GitHub drops the leading non-ASCII bundle name from uploaded asset names,
+# so publish deltas with their ASCII version-range names and keep the appcast
+# URLs in sync.
+for delta in "$ARCHIVE_DIR"/*.delta; do
+    [ -f "$delta" ] || continue
+    name=${delta##*/}
+    ascii_name=$(printf '%s\n' "$name" | sed 's/^[^0-9]*//')
+    [ "$name" = "$ascii_name" ] || mv "$delta" "$ARCHIVE_DIR/$ascii_name"
+done
+sed -i '' 's|%E6%A0%88%E6%A1%A5||g' "$ARCHIVE_DIR/appcast.xml"
